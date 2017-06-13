@@ -1,0 +1,94 @@
+A synchronization aid that allows one or more threads to wait until a set of operations being performed in other threads completes.
+
+译:CountDownLatch是一个同步工具类，它允许一个或多个线程一直等待，直到其他线程的操作执行完后再执行
+
+
+常见面试题, 可以为你的下次面试准备以下一些CountDownLatch相关的问题：
+解释一下CountDownLatch概念?
+CountDownLatch 和 CyclicBarrier的不同之处?
+给出一些CountDownLatch使用的例子?
+CountDownLatch 类中主要的方法?
+
+有时候会有这样的需求，多个线程同时工作，然后其中几个可以随意并发执行，但有一个线程需要等其他线程工作结束后，才能开始。
+举个例子:
+开启多个线程分块下载一个大文件，每个线程只下载固定的一截，最后由另外一个线程来拼接所有的分段，那么这时候我们可以考虑使用CountDownLatch来控制并发。
+
+CountDownLatch 是JAVA提供在java.util.concurrent包下的一个辅助类，可以把它看成是一个计数器，其内部维护着一个count计数，
+只不过对这个计数器的操作都是原子操作，同时只能有一个线程去操作这个计数器，CountDownLatch通过构造函数传入一个初始计数值，调用者可以通过调用
+CounDownLatch对象的cutDown()方法，来使计数减1；
+如果调用对象上的await()方法，那么调用者就会一直阻塞在这里，直到别人通过cutDown方法，将计数减到0，才可以继续执行。
+
+
+
+示例
+复制代码
+ 1 import java.util.concurrent.CountDownLatch;
+ 2 
+ 3 public class Sample {
+ 4     /**
+ 5      * 计数器，用来控制线程
+ 6      * 传入参数2，表示计数器计数为2
+ 7      */
+ 8     private final static CountDownLatch mCountDownLatch = new CountDownLatch(2);
+ 9 
+10     /**
+11      * 示例工作线程类
+12      */
+13     private static class WorkingThread extends Thread {
+14         private final String mThreadName;
+15         private final int mSleepTime;
+16         public WorkingThread(String name, int sleepTime) {
+17             mThreadName = name;
+18             mSleepTime = sleepTime;
+19         }
+20         
+21         @Override
+22         public void run() {
+23             System.out.println("[" + mThreadName + "] started!");
+24             try {  
+25                     Thread.sleep(mSleepTime);  
+26             } catch (InterruptedException e) {  
+27                     e.printStackTrace();  
+28             }
+29             mCountDownLatch.countDown();
+30             System.out.println("[" + mThreadName + "] end!"); 
+31         }
+32     }
+33     
+34     /**
+35      * 示例线程类
+36      */
+37     private static class SampleThread extends Thread {
+38         
+39         @Override
+40         public void run() {
+41             System.out.println("[SampleThread] started!");
+42             try {
+43                 // 会阻塞在这里等待 mCountDownLatch 里的count变为0；
+44                 // 也就是等待另外的WorkingThread调用countDown()
+45                 mCountDownLatch.await();
+46             } catch (InterruptedException e) {
+47                 
+48             }
+49             System.out.println("[SampleThread] end!");
+50         }
+51     }
+52     
+53     public static void main(String[] args) throws Exception {
+54         // 最先run SampleThread
+55         new SampleThread().start();
+56         // 运行两个工作线程
+57         // 工作线程1运行5秒
+58         new WorkingThread("WorkingThread1", 5000).start();
+59         // 工作线程2运行2秒
+60         new WorkingThread("WorkingThread2", 2000).start();
+61     }
+62 }
+
+运行结果：
+[SampleThread] started!
+[WorkingThread1] started!
+[WorkingThread2] started!
+[WorkingThread2] end!
+[WorkingThread1] end!
+[SampleThread] end!
