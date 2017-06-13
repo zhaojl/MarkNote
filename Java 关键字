@@ -1,0 +1,96 @@
+Android源码根目录/system/tools/aidl/type_namespace.cpp 里面有关键字定义, 共53个
+
+1.Java的关键字（keyword）有多少个？
+51+2个保留字=53个关键字(java的关键字都是小写的)
+
+2.java的保留字(reserve word)有多少个？ 分别是什么？
+     2个保留字
+     Java语言的的保留字是指预留的关键字
+     1).const  有道释义：n. 常量，常数  
+            用于修改字段或局部变量的声明。它指定字段或局部变量的值是常数，不能被修改
+     2).goto   有道释义：vi. 转到
+         指定跳转到标签，找到标签后，程序将处理从下一行开始的命令。
+         
+
+3.java的关键字分别是什么，作用是什么？
+
+1).访问修饰符的关键字（共3个）
+public    公有的    可跨包（默认选择）
+protected 受保护的  当前包内可用
+private   私有的    当前类可用
+
+2).定义类、接口、抽象类和实现接口、继承类的关键字、实例化对象（共6个）
+class
+interface
+abstract
+implements
+extends
+new
+
+3).包的关键字（共2个）
+import
+package
+
+4).数据类型的关键字（共12个）
+byte 字节型 8bit
+char 字符型 16bit
+boolean 布尔型
+short 短整型 16bit
+int  整型 32bit
+float 浮点型 32bit
+long 长整型 64bit
+double 双精度 64bit
+void
+null
+true
+false
+
+5).条件循环（流程控制）（共12个）
+if
+else
+do
+while  只要条件为真就会重复的循环
+for
+switch
+case
+default
+break
+continue
+return
+instanceof
+
+6).修饰方法、类、属性和变量（共9个）
+static
+final         应用于类, 以指示此类不能有子类; 应用于方法, 以指示不能重写任何子类中的方法
+super
+this          用于引用当前实例
+native        应用于方法，以指示该方法是用Java以外的语言实现的
+strictfp      用来声明FP_strict（单精度或双精度浮点数）表达式遵循IEEE 754算术规范
+synchronized  应用于方法或语句块, 表明一段代码需要同步执行
+transient     应用于类的成员变量, 声明该成员变量不应在包含它的类实例序列化时被序列化
+volatile      用于表示可以被多个线程异步修改的成员变量, volatile的目标用途是为了确保所有线程所看到的指定变量的值都是相同的
+
+7).错误处理（共5个）
+try
+catch
+finally
+throw  用于引发异常
+throws 应用于方法, 声明方法会引发哪些特定类型的异常
+
+8).不知道是什么（共2个）
+enum   枚举,列举
+assert 断言,用来进行程序调试
+
+
+
+
+附：throw 和throws的差别
+区别一：throw 是语句抛出一个异常；throws 是方法抛出一个异常；
+ 
+              throw语法：throw <异常对象> 
+              在方法声明中，添加throws子句表示该方法将抛出异常。
+ 
+             throws语法：[<修饰符>]<返回值类型><方法名>（[<参数列表>]）[throws<异常类>]
+             其中：异常类可以声明多个，用逗号分割。
+区别二：throws可以单独使用，但throw不能；
+区别三：throw要么和try-catch-finally语句配套使用，要么与throws配套使用。但throws可以单独使用，然后再由处理异常的方法捕获。
