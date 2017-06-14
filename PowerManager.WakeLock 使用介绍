@@ -1,0 +1,99 @@
+Android系统在手机屏幕锁定之后一般会让手机休眠，以提高电池的使用时间。但是休眠意味着CPU频率降低，有时候可能需要做一些需要大量运算的任务，所以需要
+唤醒CPU。
+
+
+PowerManager.WakeLock: 
+A wake lock is a mechanism to indicate that your application needs to have the device stay on.
+用来表示你的app需要设备保持唤醒状态。
+
+
+构造方法 或者 使用前初始化:
+PowerManager powerManager = (PowerManager) getSystemService(Context.POWER_SERVICE);
+PowerManager.WakeLock mWakeLock = powerManager.newWakeLock(PowerManager.SCREEN_DIM_WAKE_LOCK | PowerManager.ON_AFTER_RELEASE, LOG_TAG);
+添加权限:<uses-permission android:name="android.permission.WAKE_LOCK" />
+
+使用举例:
+    @Override
+    public void run() {
+        mWakeLock.acquire();//All of process should not be stopped by PM
+        
+        try {
+        
+            runInternal();//执行耗时后台操作
+            
+        } catch (Exception e) {
+        } finally {
+            if (mWakeLock != null && mWakeLock.isHeld()) {
+                mWakeLock.release();
+            }
+        }
+//耗时操作执行开始调用
+if (!mWakeLock.isHeld()) {
+  mWakeLock.acquire();
+}
+
+//释放      
+public void onDestroy() {
+  if (mWakeLock.isHeld()) {
+    mWakeLock.release();
+  }
+}
+
+
+
+WakeLock的使用：
+acquire() 获取WakeLock
+acquire(long timeOut) 获得WakeLock timeOut时长，当超过timeOut之后系统自动释放WakeLock。
+release() 释放WakeLock
+isHeld() 判断是否已经获取WakeLock
+setReferenceCounted(boolean value) 是否使用引用计数。默认开启引用计数！
+                                   类似于垃圾回收策略，只是把垃圾回收改成了WakeLock回收。
+                                   如果value是true的话将启用该特性，如果一个WakeLock acquire了多次也必须release多次才能释放掉。
+                                   但是如果释放次数比acquire多则会抛出RuntimeException("WakeLock under-locked " + mTag)异常。
+
+
+
+
+PowerManager的几个实用方法:
+isScreenOn()  判断屏幕是否亮着（不管是暗的dimed还是正常亮度），在API20被弃用，推荐使用 isInteractive()
+
+goToSleep(long time)  time是时间戳，一般是System.currentTimeMillis()+timeDelay。
+                      强制系统立刻休眠，需要Manifest中添加权限"android.permission.DEVICE_POWER"。
+                      按下电源键锁屏时调用的就是这个方法。
+
+wakeUp(long time)     与上面对应。参数含义，所需权限与上同。
+                      按下电源键解锁屏幕时调用的就是这个方法。
+
+reboot(String reason) 重启手机，reason是要传给Linux内核的参数，比如“recovery”重启进recovery模式，“fastboot”重启进fastboot模式。
+                      需要权限"android.permission.REBOOT"。
+
+
+
+
+FLAG等级:
+PARTIAL_WAKE_LOCK     保证CPU保持高性能运行，而屏幕和键盘背光（也可能是触摸按键的背光）关闭。一般情况下都会使用这个WakeLock。
+
+ACQUIRE_CAUSES_WAKEUP 这个FLAG 除了会使CPU高性能运行外还会导致屏幕亮起，即使屏幕原先处于关闭的状态下。
+
+ON_AFTER_RELEASE      如果释放的时候屏幕处于亮着的状态，则在释放之后让屏幕再保持亮一小会。如果释放的时候屏幕本身就没亮，则不会有动作
+
+WAIT_FOR_PROXIMITY_NEGATIVE 用于和接近传感器配合使用，来实现电话应用中打电话时可以使屏幕黑掉，手机离开时又能使屏幕亮起来的功能。
+                            acqure的时候屏幕会暗下来，release之后屏幕会亮。部分版本api不对上层应用开放.
+
+
+API-17被弃用的3个FLAG：
+1.SCREEN_DIM_WAKE_LOCK     保证屏幕亮起，但是亮度可能比较低,同时键盘背光也可以不亮。
+2.SCREEN_BRIGHT_WAKE_LOCK  保证屏幕全亮，同时键盘背光也亮。
+3.FULL_WAKE_LOCK           表现和2 类似，但是区别在于这个等级的WakeLock使用的是最高亮度！
+
+替代品:
+上面三个类型的作用无非就是保持屏幕长亮,所以推荐使用:
+WindowFlagWindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON
+使用方法是：
+在Activity中： getWindow().addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON);
+也可以在布局中添加这个属性：android:keepScreenOn="true"
+
+
+
+
+
