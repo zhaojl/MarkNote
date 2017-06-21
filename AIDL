@@ -1,0 +1,162 @@
+1、为什么要有AIDL？
+无论学什么东西，最先得弄明白为什么要有这个东西，不要说存在即是合理，存在肯定合理，但是你还是没有明白。
+对于AIDL有一些人的浅显概念就是，AIDL可以跨进程访问其他应用程序，和其他应用程序通讯，那我告诉你，很多技术都可以访问，
+如广播（应用A在AndroidManifest.xml中注册指定Action的广播）应用B发送指定Action的广播，A就能收到信息，这能看成不同应用之间完成了单向的通讯
+还如ContentProvider，通过URI接口暴露数据给其他应用访问；
+但是这种都算不上是应用之间的通讯。可能最让人迷惑的是Android推出来了Messager,它就是完成应用之间的通讯的。
+那么为什么还要有AIDL呢，官方文档介绍AIDL中有这么一句话：
+
+Note: Using AIDL is necessary only if you allow clients from different applications to access your service for IPC and want to handle multithreading in your service. 
+If you do not need to perform concurrent IPC across different applications, you should create your interface by implementing a Binder or, if you want to perform IPC, but do not need to handle multithreading, implement your interface using a Messenger. 
+Regardless, be sure that you understand Bound Services before implementing an AIDL.
+
+第一句最重要，“只有当你允许来自不同的客户端访问你的服务并且需要处理多线程问题时你才必须使用AIDL”，其他情况下你都可以选择其他方法，如使用Messager，也能跨进程通讯。可见AIDL是处理多线程、多客户端并发访问的。而Messager是单线程处理。还是官方文档说的明白，一句话就可以理解为什么要有AIDL。那么是不是这样的写个AIDL试试。
+
+
+一、定义AIDL文件
+// IRemoteService.aidl
+package com.example.android;
+ 
+// Declare any non-default types here with import statements
+ 
+/** Example service interface */
+interface IRemoteService {
+    /** Request the process ID of this service, to do evil things with it. */
+    int getPid();
+ 
+    /** Demonstrates some basic types that you can use as parameters
+     * and return values in AIDL.
+     */
+    void basicTypes(int anInt, long aLong, boolean aBoolean, float aFloat,
+            double aDouble, String aString);
+}
+这段代码也是官方文档的。命名为IRemoteService.aidl，放在com.example.android包下（这个可以随意），保存后Android编译器会在gen目录下自动生成IRemoteService.java文件 
+
+
+第二、定义我们的服务，DDService.java，并且需要在AndroidManifest.xml中注册，并添加“duanqing.test.aidl” 的ACTION
+package com.example.service;
+ 
+import com.example.android.IRemoteService;
+ 
+import android.app.Service;
+import android.content.Intent;
+import android.os.IBinder;
+import android.os.Process;
+ 
+public class DDService extends Service {
+    @Override
+    public void onCreate() {
+        super.onCreate();
+        System.out.println("DDService onCreate........" + "Thread: " + Thread.currentThread().getName());
+    }
+    @Override
+    public IBinder onBind(Intent arg0) {
+        System.out.println("DDService onBind");
+        return mBinder;
+    }
+ 
+    private final IRemoteService.Stub mBinder = new IRemoteService.Stub() {
+        public int getPid(){
+            System.out.println("Thread: " + Thread.currentThread().getName());
+            System.out.println("DDService getPid ");
+            return Process.myPid();
+        }
+        public void basicTypes(int anInt, long aLong, boolean aBoolean,
+            float aFloat, double aDouble, String aString) {
+            System.out.println("Thread: " + Thread.currentThread().getName());
+            System.out.println("basicTypes aDouble: " + aDouble +" anInt: " + anInt+" aBoolean " + aBoolean+" aString " + aString);
+        }
+    };
+ 
+}
+这样我们的服务端就完成了，把服务端运行到模拟器（或者手机上），等一会可以看一下打印信息，重点看“线程名” 
+
+
+第三、实现客户端测试代码 新建另一个工程，同样需要添加AIDL协议文件（这是一个标准的协议文件，定义对外服务），这里我列出来我的测试代码
+package com.example.aidlclient;
+ 
+import android.app.Activity;
+import android.content.ComponentName;
+import android.content.Context;
+import android.content.Intent;
+import android.content.ServiceConnection;
+import android.os.Bundle;
+import android.os.IBinder;
+import android.os.Process;
+import android.os.RemoteException;
+import android.view.View;
+ 
+import com.example.android.IRemoteService;
+ 
+public class MainActivity extends Activity {
+    private IRemoteService remoteService;
+    @Override
+    public void onCreate(Bundle savedInstanceState) {
+        super.onCreate(savedInstanceState);
+        setContentView(R.layout.activity_main);
+    }
+     
+    ServiceConnection conn = new ServiceConnection() {
+         
+        @Override
+        public void onServiceDisconnected(ComponentName name) {
+        }
+         
+        @Override
+        public void onServiceConnected(ComponentName name, IBinder service) {
+            remoteService = IRemoteService.Stub.asInterface(service);
+            try {
+                int pid = remoteService.getPid();
+                int currentPid = Process.myPid();
+                System.out.println("currentPID: " + currentPid +"  remotePID: " + pid);
+                remoteService.basicTypes(12, 1223, true, 12.2f, 12.3, "我们的爱，我明白");
+            } catch (RemoteException e) {
+                e.printStackTrace();
+            }
+            System.out.println("bind success! " + remoteService.toString());
+        }
+    };
+         
+    /**
+     * 监听按钮点击
+     * @param view
+     */
+    public void buttonClick(View view) {
+        System.out.println("begin bindService");
+        Intent intent = new Intent("duanqing.test.aidl");
+        bindService(intent, conn, Context.BIND_AUTO_CREATE);
+    }
+ 
+    @Override
+    protected void onDestroy() {
+        super.onDestroy();
+        unbindService(conn);
+    }
+}
+4、执行 点击客户端按钮，执行，看打印信息：
+看服务端打印，DDService onCreate..........
+Thread: main,主线程，
+当客户端调用服务端getPid方法时，服务端是在Thread: Binder2中执行，
+当客户端调用服务端basicType方法时，服务端是在Thread：Binder1中执行
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+AIDL中的三个定向tag: in,  out,  inout
+android官网上在讲到AIDL的地方关于定向tag是这样介绍的：
+All non-primitive parameters require a directional tag indicating which way the data goes . Either in , out , or inout . 
+Primitives are in by default , and connot be otherwise .
+
+直译过来就是：所有的非基本参数都需要一个定向tag来指出数据流通的方式，即in, out, inout, 基本参数的定向tag默认是并且只能是 in。
+
