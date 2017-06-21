@@ -1,0 +1,132 @@
+/*
+ * Copyright (C) 2007 The Android Open Source Project
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *      http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
+package android.database;
+
+import java.util.ArrayList;
+
+/**
+ * Provides methods for registering or unregistering arbitrary observers in an {@link ArrayList}.
+ *
+ * This abstract class is intended to be subclassed and specialized to maintain
+ * a registry of observers of specific types and dispatch notifications to them.
+ *
+ * @param T The observer type.
+ */
+public abstract class Observable<T> {
+    /**
+     * The list of observers.  An observer can be in the list at most
+     * once and will never be null.
+     */
+    protected final ArrayList<T> mObservers = new ArrayList<T>();
+
+    /**
+     * Adds an observer to the list. The observer cannot be null and it must not already
+     * be registered.
+     * @param observer the observer to register
+     * @throws IllegalArgumentException the observer is null
+     * @throws IllegalStateException the observer is already registered
+     */
+    public void registerObserver(T observer) {
+        if (observer == null) {
+            throw new IllegalArgumentException("The observer is null.");
+        }
+        synchronized(mObservers) {
+            if (mObservers.contains(observer)) {
+                throw new IllegalStateException("Observer " + observer + " is already registered.");
+            }
+            mObservers.add(observer);
+        }
+    }
+
+    /**
+     * Removes a previously registered observer. The observer must not be null and it
+     * must already have been registered.
+     * @param observer the observer to unregister
+     * @throws IllegalArgumentException the observer is null
+     * @throws IllegalStateException the observer is not yet registered
+     */
+    public void unregisterObserver(T observer) {
+        if (observer == null) {
+            throw new IllegalArgumentException("The observer is null.");
+        }
+        synchronized(mObservers) {
+            int index = mObservers.indexOf(observer);
+            if (index == -1) {
+                throw new IllegalStateException("Observer " + observer + " was not registered.");
+            }
+            mObservers.remove(index);
+        }
+    }
+
+    /**
+     * Remove all registered observers.
+     */
+    public void unregisterAll() {
+        synchronized(mObservers) {
+            mObservers.clear();
+        }
+    }
+}
+要学习此类中的同步注册/反注册 代码规范~
+
+
+
+
+
+
+
+
+
+
+MatrixCursor和MergeCursor
+
+1、MatrixCursor创建记录
+ContentProvider对外共享数据的时候的query()方法是需要一个cursor的，
+但是如果没有数据库，而项目又需要从ContentProvider读取数据的时候怎么办？
+更糟糕的是其他方法操作也都是需要cursor的。
+此时就需要MatrixCursor了。相当有趣，它相当于为你模拟了一个表。
+
+@Override
+public Cursor query(Uri uri, String[] projection, String selection, String[] selectionArgs, String sortOrder) {
+  String[] tableCursor = new String[]{ "name","job","salary" };
+  MatrixCursor cursor = new MatrixCursor(tableCursor);
+  cursor.addRow(new Object[]{ "1111","1111","1111" });
+  return cursor;
+}
+
+2、MergeCursor 记录的合并
+Cursor c0 = MailboxList.this.managedQuery(  
+                    EmailContent.Mailbox.CONTENT_URI,  
+                    MailboxList.this.mListAdapter.PROJECTION,  
+                    MAILBOX_SELECTION0,  
+                    new String[] { String.valueOf(mAccountKey) },  
+                    MailboxColumns.TYPE);  
+Cursor c1 = MailboxList.this.managedQuery(  
+            EmailContent.Mailbox.CONTENT_URI,  
+            MailboxList.this.mListAdapter.PROJECTION,  
+            MAILBOX_SELECTION,  
+            new String[] { String.valueOf(mAccountKey) },  
+            MailboxColumns.TYPE/* + "," + MailboxColumns.DISPLAY_NAME*/);  
+Cursor c2 = MailboxList.this.managedQuery(  
+        EmailContent.Mailbox.CONTENT_URI,  
+        MailboxList.this.mListAdapter.PROJECTION,  
+        MAILBOX_SELECTION1,  
+        new String[] { String.valueOf(mAccountKey) },  
+        MailboxColumns.TYPE/* + "," + MailboxColumns.DISPLAY_NAME*/);  
+
+Cursor[] cursors = new Cursor[] { c0, c1, c2 };  
+Cursor c = new MergeCursor(cursors);  
