@@ -1,0 +1,141 @@
+第一章 建立Android系统开发环境
+
+
+
+Google推荐使用64位Ubuntu操作系统开发Android.
+Ubuntu是一款优秀的Linux桌面操作系统, 每年4月和10月固定发行2个版本, 其中偶数年的4月发行的版本作为TLS版本(长期支持版), 可以得到3年的升级支持.
+
+
+
+Ubuntu:
+https://www.ubuntu.com
+Canonical有限公司(Canonical Group Ltd)
+
+
+
+更改软件源
+安装完成后可以将Ubuntu的软件源切换成国内的镜像, 提高下载安装各种软件包的速度, 下面是更改软件源的操作步骤:
+依次点击"System Settings -> Software & Updates -> Ubuntu Software,
+然后点击"Download from"选项列表, 在弹出的列表中选择Others -> China...,
+找到后选择一个镜像地址(例如: mirrors.sohu.com),
+执行命令 sudo apt-get update 来下载最新的软件包列表.
+
+
+
+Ubuntu能同时安装一个软件的不同版本, 下面是安装4.4版本的gcc和g++的命令:
+sudo apt-get install gcc-4.4 g++-4.4 g++-4.4-multilib gcc-4.4-multilib
+sudo update-alternatives --install /usr/bin/gcc gcc /usr/bin/gcc-4.4 50
+sudo update-alternatives --install /usr/bin/g++ g++ /usr/bin/g++-4.4 50
+sudo update-alternatives --config gcc
+sudo update-alternatives --config g++
+
+
+
+安装OpenJDK 1.8命令
+sudo apt-get install openjdk-8-jdk
+sudo update-alternatives --config java
+sudo update-alternatives --config javac
+
+
+
+安装编译需要的开发包
+Google指定的编译环境的构建方法请参见路径http://source.android.com/source/initializing.html
+
+
+安装一些有用的开发工具
+Android SDK: 附带很多有用工具, 如adb, ddms, hierarchyviewer等, 都是进行Android系统开发调试必须用到的.
+Android Studio: Google基于著名的IntelliJ IDEA修改而来的免费集成开发工具.
+Source Insight: 优秀的源码分析工具, 是分析Android源码的利器.
+Meld: 比较合并工具, 安装命令:sudo apt-get install meld.
+Git: 开放源码的版本控制软件.
+Repo: 是Google开发的一个脚本文件, 只是在Git的基础上封装了一层, 用来简化Git下载Android源码的过程.(下载Kernel的源码还是要使用Git命令)
+
+
+
+Repo的使用方法及步骤:
+1. 下载Repo的最新版本:
+    $ curl https://storage.googleapis.com/git-repo-downloads/repo > ~/bin/repo
+2. 修改文件的属性为可执行:
+    $ chmod a+x~/bin/repo
+3. 下载代码前, 需要知道版本的分支名, 通过Repo可以查看所有分支名, 例如:
+    $ repo init -u https://android.googlesource.com/platform/manifest
+4. 初始化下载信息
+    $ repo init -u https://android.googlesource.com/platform/manifest -b android-5.1.0_r2
+    $ repo init -u git://aosp.tuna.tsinghua.edu.cn/android/platform/manifest -b android-5.0.2_r1
+5. 启动多个线程同时下载:
+    $ sync -j8 -qc --no-tags
+说明:
+    repo init 的 -u 参数指定用来初始化的软件仓库, -b 参数指定某个分支(不指定则默认为master分支).
+    repo help 和 repo help init 命令可以查看帮助.
+注意:
+    Repo 的 init 指令运行后会在当前目录下创建一个隐藏目录.repo, 重新执行init指令前必须先删除这个隐藏目录, 否则执行会失败.
+
+
+
+
+亲测有效的编译环境搭建流程
+Build:
+Android O requires Java JDK 1.8. If it is not yet installed on your working environment, install it with this command:
+    sudo apt-get install openjdk-8-jdk
+
+Kernel is upgraded to msm-4.4. You need to install libssl in order to pass kernel build:
+    sudo apt-get install libssl-dev
+
+Install xlrd
+    sudo pip install xlrd
+
+Install protobuf
+    1. Install protobuf compiler:
+        Ubuntu 14:
+        wget https://github.com/google/protobuf/releases/download/v2.6.1/protobuf-2.6.1.tar.gz 
+        tar -xzvf protobuf-2.6.1.tar.gz 
+        cd protobuf-2.6.1 
+        sudo ./configure 
+        sudo make 
+        sudo make check 
+        sudo make install
+        
+        Ubuntu 16:
+        sudo apt-get install protobuf-compiler
+        
+        Check the protoc version, it should be 2.6.1 
+        protoc --version
+        
+        On Ubuntu 14, if you see the following error when executing the above command:
+        protoc: error while loading shared libraries: libprotoc.so.8: cannot open shared
+        Solution:
+        sudo vi /etc/ld.so.conf.d/libprotobuf.conf
+        write the file with one line as below:
+        /usr/local/lib
+        then run: sudo ldconfig; protoc --version
+    
+    2. sudo apt-get install python-protobuf
+    
+    3. sudo pip install protobuf
+        If you see the following error when executing the above command:
+            Requirement already satisfied (use --upgrade to upgrade): protobuf in /usr/lib/python2.7/dist-packages
+        Solution:
+        sudo pip install --upgrade protobuf
+
+
+    Build command:
+        Android HLOS only:
+            sync -j8 -qc --no-tags
+            source build/envsetup.sh
+            lunch df91_hu_mpc-userdebug
+            make -j8
+          
+        Full build for QFIL package:
+            ./make_leauto.sh -b qfil -p df91_hu_mpc -t emmc -j8
+
+
+
+Potential issues and solutions:
+    error fatal: ssh variant 'simple' does not support setting port
+    => export GIT_SSH_VARIANT=ssh
+    
+    keep asking for passphrase
+    => eval $(ssh-agent)
+    => ssh-add ~/.ssh/id_rsa
+
+请参考链接https://www.jianshu.com/p/6c2de181d83a

@@ -1,0 +1,63 @@
+第14章 Android的图形显示系统
+
+
+
+
+Surface是继Audio系统后要破解第二个复杂的系统。它的难度和复杂度远远超过了Audio。基于这种情况，本章将集中精力打通Surface系统的“任督二脉”，这任督二脉分别是：
+·  任脉：应用程序和Surface的关系。
+·  督脉：Surface和SurfaceFlinger之间的关系。
+图Surface系统的任督二脉.png直观的展示了这种关系.
+先看左图。可以发现，不论Skia绘制二维图像，还是用OpenGL绘制三维图像，最终Application都要和Surface交互。
+Surface就像是UI的画布，而App则像是在Surface上作画。所以要想打通任脉，就须破解App和Surface之间的关系。
+再看右图。Surface和SurfaceFlinger的关系，很像Audio系统中AudioTrack和AudioFlinger的关系。
+Surface向SurfaceFlinger提供数据，而SurfaceFlinger则混合数据。所谓打通督脉的关键，就是破解Surface和SurfaceFlinger之间的关系。
+
+
+
+frameworks/base/core/java/android/view
+WindowManagerImpl.java
+ViewGroup.java
+View.java
+SurfaceView.java
+Surface.java
+SurfaceSession.java
+SurfaceControl.java
+TextureView.java
+ThreadedRenderer.java
+
+
+frameworks/native/libs/gui
+BufferQueueCore.cpp
+ISurfaceComposer.cpp
+ISurfaceComposerClient.cpp
+IGraphicBufferProducer.cpp
+IGraphicBufferConsumer.cpp
+IDisplayEventConnection.cpp
+IProducerListener.cpp
+IConsumerListener.cpp
+
+
+frameworks/native/services/surfaceflinger
+surfaceflinger.rc 启动文件
+main_surfaceflinger.cpp 入口函数
+SurfaceFlinger.cpp
+SurfaceFlinger_hwc1.cpp  设置软件VSync信号的间隔, 正好是1/60HZ, mPrimaryDispSync.setPeriod(16666667);
+MonitoredProducer.cpp
+
+StartPropertySetThread.cpp
+MonitoredProducer.cpp
+SurfaceFlingerConsumer.cpp
+SurfaceInterceptor.cpp
+Transform.cpp
+
+
+Activity
+
+WindowManager
+PhoneWindow -> WindowManagerImpl -> WindowManagerGlobal -> ViewRootImpl中有定义final Surface mSurface = new Surface(); -> SurfaceFlinger
+ -> WindowManagerService:mFxSession = new SurfaceSession();
+Window
+DecorView
+FrameLayout
+ViewGroup
+

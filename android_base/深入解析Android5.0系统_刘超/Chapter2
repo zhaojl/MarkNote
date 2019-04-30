@@ -1,0 +1,8 @@
+第二章 Android的编译环境－Build系统
+
+
+Android的Build系统是基于GNU Make 和 Shell 构建的一套编译环境.
+Android的Build系统可以分成3大块:
+第一块是位于build/core目录下的文件, 这是Android Build系统的框架和核心.
+第二块是位于device目录下的文件, 存放的是具体产品的配置文件.
+第三块是各模块的编译文件Android.mk, 位于模块的源文件目录下.

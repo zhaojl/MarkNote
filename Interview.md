@@ -14,6 +14,15 @@ SharedPreference是线程/进程安全的吗
 
 
 
+
+
+SharedPreferences线程安全，不支持多进程使用
+多进程通信用ContentProvider
+
+
+
+
+
 梧桐车联:
 腾讯占股百分之五十一
 长安占股百分之四十九

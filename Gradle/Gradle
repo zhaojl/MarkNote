@@ -1,0 +1,33 @@
+Android Gradle权威指南
+
+
+作者李帅, 网名飞雪无情的博客地址
+https://www.flysnow.org/
+
+
+
+Gradle简介
+Gradle: 一款非常优秀的构建系统工具，使用一种基于Groovy的特定领域语言(DSL)来声明项目设置.
+Gradle Wrapper: 对gradle的一层包装, 通过读取配置文件中gradle的版本，为每个项目自动的下载和配置gradle, 在开发过程中统一gradle构建的版本.
+Android Plugin for Gradle: 编译Android App的插件, 使Android Studio能支持运行Gradle．
+
+Gradle配置方式
+1. 指定Gradle插件版本有两种方式:
+    通过选择File > Project Structure > Project > Android plugin Version 来指定Gradle插件版本.
+    在项目外层build.gradle中修改配置:
+        buildscript {
+           dependencies {
+                   classpath 'com.android.tools.build:gradle:3.2.1'
+           }
+        }
+
+2. 指定Gradle版本也有两种方式：
+    通过选择File > Project Structure > Project > Gradle version 来指定Gradle版本.
+    在gradle/wrapper/gradle-wrapper.properties文件中编辑Gradle引用地址:
+        distributionUrl=https\://services.gradle.org/distributions/gradle-4.6-all.zip
+
+
+官方指导文档
+Gradle: https://docs.gradle.org/current/userguide/userguide_single.html
+Gradle Wrapper: https://docs.gradle.org/current/userguide/gradle_wrapper.html
+Android Plugin for Gradle: https://developer.android.com/studio/build/index.html
