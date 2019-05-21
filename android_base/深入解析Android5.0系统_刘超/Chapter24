@@ -1,0 +1,130 @@
+第24章 Android的调试方法
+
+
+本章介绍Android系统开发中常用的调试方法和技巧. 实际上系统开发的调试手段远没有应用开发那么方便, 最常用的手段就是输出Log.
+
+
+
+24.1 获取和分析系统Log
+    在系统开发过程中, 抓取和分析Log是一项很有挑战性的工作. 分析Log有难度大家都能理解, 为什么抓取Log还有困难呢? 
+    有些问题可能需要重复几十次甚至几百次才能出现一次, 当问题出现时, 如果抓取Log不及时或者抓取的信息不够多,解决问题的机会就会丧失,损失的将是项目的开发时间.
+    
+    
+  24.1.1 Logcat使用说明
+     Android主要使用adb logcat命令来抓取Log.
+     Log分级:
+       V    Verbose (default for <tag>)
+       D    Debug (default for '*')
+       I    Info
+       W    Warn
+       E    Error
+       F    Fatal
+       S    Silent (suppress all output)
+     注意:
+        搜索"E/"查看提示错误的Log.
+        Android比较常见的严重问题有两大类: 一是程序崩溃, 二是产生了ANR. 崩溃和ANR可能发生在Java层或者native层, java层的问题比native层容易定位.
+    
+    查看Logcat的帮助信息:
+    $ adb logcat --help
+    $ adb logcat -c             清除已有Log信息.
+    $ adb logcat -d             输出当前Log后立即退出.
+    $ adb logcat -t 1000        输出最新的1000行Log后退出.
+    $ adb logcat -g             查看缓冲区大小.
+    $ adb logcat -b main/system 指定打印缓冲区, 缺省情况下只打印main和system缓存区的Log.
+    $ adb logcat -v time -b main,system,crash,radio,events,default,all    打印出Android系统的所有Log并带上时间信息
+    $ adb logcat > log.txt      把Log输出到文件log.txt
+    $ adb logcat | grep keyword 根据关键词来过滤Log
+    $ adb logcat -v long/thread/time/brief/color/epoch/monotonic/printable/process/raw/tag/thread/threadtime/uid/usec/UTC/year/zone)
+    注意:
+        在Ubuntu的终端窗口输出Log时, 常常不能查看到所有Log, 因为缺省情况下终端窗口的缓冲区有限, 我们可以把这个值改为无限制, 自行百度"Ubuntu中调整终端terminal显示的缓冲区大小".
+        
+    
+  24.1.2 如何分析Android Log
+    以用adb logcat -v long -d命令打印出的Log为例("long格式会把时间,标签等作为单独的一行显示)
+    首先看Android Log的格式:
+    [ 05-06 18:08:46.293   468:  522 I/BufferQueueProducer ]
+    [StatusBar](this:0x7f9f558000,id:7,api:1,p:4001,c:468) queueBuffer: fps=0.33 dur=3003.37 max=3003.37 min=3003.37
+    第一行:分别是日期,时间,468是进程号,522是线程号,I代表Log优先级,BufferQueueProducer是Log标签.
+    在应用开发中,这些Log的作用可能不大,但是系统开发中,这些都是很重要的辅助信息.
+    
+    注意:
+        1.要求测试报bug时必须填上Bug发生的时间.
+          因为工作中测试工程师抓取的Log可能根本就不是出错时的Log, 这样就可以结合Log里的时间戳大致判断是不是发生错误时的Log, 根据Bug发生时间点,快速定位错误位置,缩小分析范围.
+        2.在调用Log输出函数时调用系统时间函数获取当时时间,然后再通过Log信息打印输出, 只有这样获得时间才是可靠地.
+          因为在一小段时间内两个线程输出Log的先后是随机的, Log打印的先后顺序并不完全等同于执行的顺序. Log中的时间戳是系统打印输出Log时的时间, 并不是代码里调用Log输出函数的时间. 
+        3.看Log时一定要看进程id,把相同进程id的Log放到一起分析.
+          因为我们看到的Log文件,不同进程的Log信息实际上是混杂在一起输出的,有时即使是一个函数内的两条相邻的Log, 也会出现不同进程的Log交替输出的情况(A进程的第一条Log后面跟着的是B进程的第二条Log).
+        4.区分Java层输出的Log和native层输出的Log, 不要认为Log前面的线程Id不同就是两个不同线程的Log.
+          要注意Java层和native层线程Id的区别, 防止被误导.
+          
+          
+  24.1.3 如何分析ANR
+    ANR, Application No Responding, 应用无响应
+    系统在回调应用的功能模块的地方会加时间检查, 应用在规定时间内不能完成处理,说明该应用工作不正常, 此时会弹出对话框让用户选择是否关闭该应用. 选择关闭之后,系统将杀死进程, 并记录下相关Log.
+    哪些情况会导致ANR? 从Android的代码来看主要有以下几种情况:
+    (1)KeyDispatchTimeOut: 按键或触摸事件在特定时间内无法处理完成
+    (2)BroadcastTimeOut:   广播在特定时间内无法处理完成
+    (3)ProviderTimeOut:    Provider在特定时间内无法处理完成
+    (4)ServiceTimeOut:     Service在特定时间内无法处理完成
+    (5)一些不太常见的地方.
+    在ANRLog中的关键字:
+        ANR in com.test.myapp           发生ANR的模块
+        Reason: keyDispatchingTimeOut   ANR原因
+        Load:
+        CPU usage from 9666ms to 0ms ago: 出问题时CPU的使用率
+    注意:
+        如果CPU的使用率非常高,接近100%, 说明CPU很忙,可能正在进行大规模计算, 更可能陷入了死循环;
+        如果CPU的使用率很少,接近100%, 说明主线程挂起了, 在这种情况下如果IOWait很高,说明ANR的原因可能是主线程在等待I/O操作的完成;
+        对于ANR只是分析Log不太容易知道问题所在, 还需要分析对应的traces.txt文件, 发生ANR时,Android会把系统中所有线程堆栈输出到手机的data/anr/traces.txt文件中;
+        发生在native层的ANR, 堆栈中不会有相关的调用路径, 此时只能在native层添加更多的Log来一步一步查找;
+    
+    
+24.2 内存泄露的分析方法
+    内存泄露是程序开发中最头痛的问题之一. 
+        1.应用设计不当导致内存泄露.
+        2.一个不再需要的对象还通过某种隐蔽的方式被引用着, 这个对象占用的内存就无法被回收导致的内存泄露
+    24.2.1 DDMS的AllocationTracker - 分析内存使用情况
+    24.2.2 DDMS的DumpHeap工具
+    24.2.3 使用MAT分析内存泄露
+    24.2.4 使用Valgrind分析内存泄露
+
+
+24.3 Android的自动化测试
+    24.3.1 Monkey
+    24.3.2 MonkeyRunner - 让用户开发控制程序
+    24.3.3 uiAutomator - UI测试工具
+    
+    
+zhaojl/.android/avd/Cid_API_28.avd/*.lock and try again.
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+

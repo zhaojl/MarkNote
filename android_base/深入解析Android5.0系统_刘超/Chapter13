@@ -1,0 +1,122 @@
+第13章 Android的多用户模式
+
+
+
+Android从4.2开始支持多用户模式, 即多个用户使用系统, 通常第一个在系统中注册的用户将默认成为系统管理员.
+
+
+
+13.1 管理用户的系统服务 - UserManagerService服务
+  Android用来管理用户的服务是UserManagerService, 主要功能是创建和删除用户, 以及查询用户
+
+  13.1.1 初始化
+        UserManagerService的初始化
+        mUsersDir是/data/system/user目录
+        第一个用户的目录是/data/system/user/0目录
+        分析文件/data/system/user/userlist.xml以及用户的信息文件 (userlist.xml文件中保存了系统中所有用户的Id信息)
+        寻找那些在userlist.xml文件中属性partial为true的用户
+        属性为partial表示创建没完成的用户, 从系统移除它们
+        分析文件/data/system/user/0.xml 读取此文件中的内容来创建和初始化一个UserInfo对象并添加到mUsers中(0号用户的文件名, id.xml对应一个id的用户信息).
+        注:
+            UserManagerService的初始化主要工作就是分析userlist.xml文件, 并创建了mUsers中UserInfo对象.
+            /data目录, /data/user目录 和 /data/system/user目录
+    
+  13.1.2 用户的UserInfo定义
+        UserInfo对象代表用户, frameworks/base/core/java/android/content/pm/UserInfo.java, 它的定义如下:
+            public int id;      //用户id
+            public int serialNumber; //用户的序列号, 不会重复
+            public String name; //用户的名称
+            public String iconPath; //用户的头像路径
+            public int flags;   //用户的标志
+            public long creationTime; //创建用户的时间
+            public long lastLoggedInTime; //上次登陆的时间
+            public String lastLoggedInFingerprint;
+            /**
+             * If this user is a parent user, it would be its own user id.
+             * If this user is a child user, it would be its parent user id.
+             * Otherwise, it would be {@link #NO_PROFILE_GROUP_ID}.
+             */
+            public int profileGroupId;
+            public int restrictedProfileParentId;
+            /** Which profile badge color/label to use. */
+            public int profileBadge;
+            public boolean partial; //此标识为true, 表示用户没有创建完成, User is only partially created
+            public boolean guestToRemove;
+        注意:
+            用户id用来标识用户, 用户删除后它的id会分配给下一个新建用户, 保持id号的连续.
+            serialNumber是一个在设备中不会重复的数字, 用来唯一标识一个用户, 如果应用中希望记录和某个用户相关的信息, 最好使用serialNumber, 而不是用户id.
+    
+  13.1.3 用户限制(Restriction)
+        文件frameworks/base/core/java/android/os/UserManager中定义了很多和用户相关的限制, 供管理员在创建用户时根据这些限制来给予不同用户不同的权限.
+        
+  13.1.4 添加用户
+        UserManagerService中添加用户的接口是createUser()
+        首先检查调用者的权限, 只有system身份的进程才能调用这个方法.
+        然后调用createUserInternal()继续执行.
+        
+  13.1.5 删除用户
+        UserManagerService中删除用户的接口是removeUser()
+        首先将用户信息中的partial属性改成true, 并没有立即删除用户相关的文件. 这样做的好处是如果后面的过程被意外终止了, 系统重启后还是会删除该用户所有目录和文件.
+        考虑到被删除的用户可能正在运行, 因此, removeUser()要调用ActivityManagerService的stopUser()方法来改变用户的运行状态.
+        结束后,AMS将调用函数参数中的回调方法, 这将最后调用到finishRemoveUser()方法.
+        
+  13.1.6 Guest用户
+        创建Guest用户需要通过UserManager的createGuest()方法来完成.
+        最后调用mService.createUser(name, UserInfo.FLAG_GUEST)创建一个Guest用户.
+        Guest用户和普通用户的区别在于权限不同.
+    
+    
+    
+13.2 PackageManagerService和多用户
+  在多用户的环境中, 所有用户安装的应用还是位于/data/app目录, 但是这些应用的数据在每个用户的目录/data/user/<用户id>下都有单独的一份.
+  目录/data/data也还保存有应用的数据, 不过这些数据只对id为0的用户有效, 即对系统管理员有效.
+  13.2.1 创建用户的应用数据 PackageManagerService的createNewUser()方法
+  13.2.1 删除用户的应用数据 PackageManagerService的cleanUpUser()方法
+
+
+
+13.3 ActivityManagerService和多用户
+  13.3.1 用户的状态 UserState
+        // User is first coming up.
+        public final static int STATE_BOOTING = 0; //用户正在启动
+        // User is in the locked state.
+        public final static int STATE_RUNNING_LOCKED = 1;
+        // User is in the unlocking state.
+        public final static int STATE_RUNNING_UNLOCKING = 2;
+        // User is in the running state.
+        public final static int STATE_RUNNING_UNLOCKED = 3;//用户正在运行
+        // User is in the initial process of being stopped.
+        public final static int STATE_STOPPING = 4;//用户正在停止
+        // User is in the final phase of stopping, sending Intent.ACTION_SHUTDOWN.
+        public final static int STATE_SHUTDOWN = 5;//用户已经关闭
+  13.3.1 切换当前用户 switchUser()
+  13.3.1 停止用户运行 stopUser()
+    
+    
+注意:
+    UserHandle
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+

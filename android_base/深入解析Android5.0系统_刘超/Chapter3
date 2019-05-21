@@ -1,2 +1,55 @@
 第三章 连接Android和Linux内核的桥梁－Android的Bionic
 
+<<<<<<< HEAD
+
+3.1 Bionic简介
+3.1.1 Bionic的特性
+3.1.2 Bionic中的模块简介
+3.2 Bionic C库中的系统调用
+3.2.1 系统调用简介
+3.2.2 系统调用的实现方法
+3.3 Bionic中的内存管理函数
+3.3.1 系统调用brk和mmap
+3.3.2 内存分配器——dlmalloc
+简介
+3.3.3 dlmalloc函数用法指南
+3.4 管道
+3.4.1 匿名管道PIPE和命名
+管道FIFO
+3.4.2 匿名管道的使用方法
+3.5 Bionic中的线程管理函数
+3.5.1 Bionic线程函数的特性
+3.5.2 创建线程和线程的属性
+3.5.3 退出线程的方法
+3.5.4 线程本地存储TLS
+3.5.5 线程的互斥量（Mutex）
+函数
+3.5.6 线程的条件量（Condition）
+函数
+3.6 Futex同步机制
+3.6.1 Futex的系统调用
+3.6.2 Futex的用户态操作
+3.6.3 Mutex类使用Futex
+实现同步
+3.7 Android的 Log模块
+3.7.1 Android Log系统的架构
+3.7.2 Log系统的接口和用法
+3.7.3 Log系统的实现分析
+3.8 可执行文件格式分析
+3.8.1 ELF格式简介
+3.8.2 ELF文件头格式
+3.8.3 程序头部表
+3.8.4 与重定位相关的“节区”的
+信息——DYNAMIC段
+3.8.5 函数的重定位过程
+3.9 Bionic中的Linker模块
+3.9.1 可执行程序的装载
+3.9.2 可执行程序的初始化
+3.9.3 Linker装载动态库
+3.10 调试器——Ptrace和Hook API
+3.10.1 ptrace函数简介
+3.10.2 Hook API的原理
+3.10.3 利用ptrace实现
+Hook API 
+=======
+>>>>>>> 2f289295a7bee3b9a989b1c4b9e7fe0cf492964d

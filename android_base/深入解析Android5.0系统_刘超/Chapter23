@@ -1,0 +1,103 @@
+第23章 系统升级模块 - Android的Recovery模块
+
+
+Recovery是Android用来执行系统升级的模块. Android原生的Recovery容易理解,第三方的Recovery使用方便且流行.
+
+
+
+23.1 Recovery模块的执行
+  安卓设备启动时会根据检测到的按键组合来决定是否进入Recovery模式.
+  Recovery模式下同样会装载Linux内核, 这个内核和正常启动时的内核一致的, 只是不会进入图像模式.
+  Recovery模式的主要功能是使用更新包升级系统.
+
+  更新包的组成:
+    boot.img    用来更新boot分区, 它由Linux Kernel和根文件系统的映像ramdisk组成. boot.img不是升级包中必须包含的文件
+    system/目录  此目录下的文件用来替换系统的System分区中的文件, 包括各种应用,系统库和系统配置文件
+    recovery/目录 此目录下的文件用于Recovery模块的升级, 其中recovery-from-boot.p文件用来更新recovery分区,子目录etc中的install-recovery.sh文件是更新脚本
+        recovery/recovery-from-boot.p
+        recovery/etc/install-recovery.sh
+    META-INF目录
+        CERT.RSA 签名文件,只有更新包的签名和设备的签名相匹配才能进行系统升级
+        CERT.SF  签名文件,只有更新包的签名和设备的签名相匹配才能进行系统升级
+        MANIFEST.MF
+        com/google/android/update-binary 一个可执行文件, 用来解释执行update-script文件, 完成系统的更新操作
+        com/google/android/update-script 更新脚本/升级用的脚本文件
+        com/google/android/metadata     此文件包含了一些设备信息, 如设备型号,时间,版本类型等
+    注:
+        一些第三方的Recovery模块会去掉升级包的签名校验,这样手机就能刷第三方的ROM了
+
+
+
+  23.1.1 Recovery模块的启动
+    Recovery模块的源码位于bootable/recovery, 入口函数main()位于在文件bootable/recovery/recovery.cpp
+
+  23.1.2 如何传递启动参数
+    Bootloader和Recovery模块以及主系统之间的通信是通过系统的misc分区来完成的.
+    
+    
+  23.1.3 执行菜单命令
+    Recovery执行菜单命令后,在屏幕上打印出菜单.
+    用户使用上下音量键来移动菜单的选择条,然后使用power键确认选择.得到用户输入后, 根据输入的命令进行处理:
+        REBOOT      退出Recovery重新启动
+        WIPE_DATA   恢复出厂设置, 它将清除手机上所有的用户数据,包括cache分区下的内容
+        WIPE_CACHE  只会cache分区下的内容
+        APPLY_EXT   让用户通过UI从SDCard上挑选一个文件进行系统更新操作
+        APPLY_CACHE 让用户通过UI从/cache目录下挑选文件来执行更新操作
+        APPLY_ADB_SIDELOAD  启动ADBD, 让用户能通过adb连接来执行sideload命令上传更新文件到/tmp/update.zip, 然后再执行更新操作
+    注:
+        这些方式只是上传更新包的方式不一样, 实际的更新过程是相同的.
+    
+
+23.2 Recovery的升级过程
+  23.2.1 sideload方式安装
+     sideload安装方式的入口是apply_from_adb()函数
+    
+  23.2.2 升级函数的入口
+     所有的更新方式都会调用install_package()函数, 它是系统升级的入口
+     try_update_binary()函数把更新包中的META-INF/com/google/android/update-binary文件解压缩出来放到/tmp目录中, 然后创建一个子进程来运行update-binary可执行文件,
+     update-binary将根据更新包中的update-script脚本来更新系统文件.
+     子进程更新过程中, recovery进程通过管道和子进程保持联系, 子进程把更新的进度通过管道传递给recovery, 由recovery显示出来.
+     
+23.3 update-binary模块
+    update-binary才是最后执行系统升级的模块, update-binary模块的源文件位于bootable/recovery/updater中, 这个目录下的Android.mk文件中指定的模块名是updater,
+    update-binary是在制作更新包时指定的一个新文件名.
+    
+   23.3.1 update-binary的执行流程  main()函数
+   23.3.2 update-script的语法规则  update-binary支持的命令有33种,这些命令定义在在RegisterBuiltins()函数和RegisterInstallFunctions()函数中
+
+     
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+

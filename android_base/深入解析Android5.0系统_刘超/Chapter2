@@ -1,5 +1,35 @@
 第二章 Android的编译环境－Build系统
 
+<<<<<<< HEAD
+2.1 Android Build系统核心
+    2.1.1 编译环境的建立
+    2.1.2 Build相关的环境变量
+    2.1.3 Build系统的层次关系
+    2.1.4 分析main.mk文件
+    2.1.5 Build系统的编译目标介绍
+    2.1.6 分析config.mk文件
+    2.1.7 分析product_config.mk文件
+    2.1.8 Android 5.0中的64位编译
+2.2 Android的产品配置文件
+    2.2.1 分析hammerhead的配置
+    文件
+    2.2.2 编译类型eng、user和userdebug
+    2.2.3 产品的Image文件
+    2.2.4 如何加快编译速度
+    2.2.5 如何编译Android的模拟器
+2.3 编译Android的模块
+    2.3.1 模块编译变量简介
+    2.3.2 常用模块定义实例
+    2.3.3 预编译模块的目标定义
+    2.3.4 常用“LOCAL_”变量
+2.4 Android中的签名
+    2.4.1 Android应用签名方法
+    2.4.2 Android系统签名介绍
+    2.4.3 Android签名漏洞分析 
+
+
+=======
+>>>>>>> 2f289295a7bee3b9a989b1c4b9e7fe0cf492964d
 
 Android的Build系统是基于GNU Make 和 Shell 构建的一套编译环境.
 Android的Build系统可以分成3大块:

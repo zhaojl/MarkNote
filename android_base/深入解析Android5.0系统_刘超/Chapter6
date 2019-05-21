@@ -1,2 +1,33 @@
+<<<<<<< HEAD
+第6章 Android的同步和消息机制
+
+
+6.1 原子操作
+6.1.1 Android的原子操作函数
+6.1.2 原子操作的实现原理
+6.1.3 内存屏障和编译屏障
+6.2 Android native层的同步方法
+6.2.1 互斥体Mutex和自动锁
+Autolock
+6.2.2 解决线程同步——条件
+类Condition
+6.3 Android Java层的同步机制
+6.3.1 同步关键字synchronized
+6.3.2 Object类在同步中
+的作用
+6.4 Android的消息机制
+6.4.1 消息模型
+6.4.2 理解Looper类
+6.4.3 理解Handler类
+6.4.4 消息的同步——Message
+类的setAsynchronous()
+方法
+6.4.5 分析MessageQueue类
+6.5 进程间的消息传递
+6.5.1 理解Messenger类
+6.5.2 建立通信通道——
+AsyncChannel类的作用 
+=======
 第六章 连接Java和C/C++层的关键－Android的JNI
 
+>>>>>>> 2f289295a7bee3b9a989b1c4b9e7fe0cf492964d

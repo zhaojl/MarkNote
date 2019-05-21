@@ -1,2 +1,45 @@
 第四章 进程间通信－Android的Binder
 
+<<<<<<< HEAD
+4.1 Binder简介
+4.1.1 Binder对象定义
+4.1.2 Binder的架构
+4.1.3 组件Service和匿名
+Binder服务
+4.1.4 Binder的层次
+4.2 如何使用Binder
+4.2.1 使用Binder服务
+4.2.2 Binder的混合调用
+4.2.3 用Jave开发Binder服务
+4.2.4 用C 开发Binder服务
+4.3 Binder应用层的核心类
+4.3.1 IInterface中的两个宏
+4.3.2 Binder核心类的关系
+4.3.3 函数asInterface的奥秘
+4.3.4 Binder的“死亡通知”
+4.3.5 Jave层的Binder类
+4.4 Binder的实现原理
+4.4.1 Binder的线程模型
+4.4.2 Binder对象的传递
+4.4.3 分析IPCThreadState类
+4.5 Binder驱动
+4.5.1 应用层和驱动的消息
+协议
+4.5.2 Binder驱动分析
+4.5.3 Binder的内存共享机制
+4.5.4 驱动的ioctl操作
+4.5.5 Binder调用过程
+4.5.6 处理传递的Binder对象
+4.6 解析名称的模块——
+ServiceManager的作用
+4.6.1 ServiceManager的架构
+4.6.2 ServiceManger提供
+的服务
+4.7 匿名共享内存ashmem
+4.7.1 ashmem的作用和用法
+4.7.2 ashmem驱动的实现原理
+4.7.3 ashemem驱动的代码
+分析
+4.7.4 进程间传递文件描述符 
+=======
+>>>>>>> 2f289295a7bee3b9a989b1c4b9e7fe0cf492964d
