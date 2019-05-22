@@ -13,3 +13,16 @@ adb shell getprop
 
 使用下面命令查看系统的环境变量:
 adb shell export -p
+
+查看最上层成activity名字
+adb shell dumpsys activity | grep "mFocusedActivity"
+
+查看包名：
+adb shell ls data/data
+
+查看包名和app具体路径：
+adb shell pm list package -f
+
+查看应用主界面：
+adb shell logcat | grep START, 启动应用,查看"cmp="后面就是我们所需的主界面名.
+
