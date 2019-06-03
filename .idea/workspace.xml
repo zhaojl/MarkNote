@@ -2,27 +2,13 @@
 <project version="4">
   <component name="ChangeListManager">
     <list default="true" id="86933e43-61cb-4f1c-8d60-f77b187f0ea1" name="Default" comment="">
-      <change beforePath="" afterPath="$PROJECT_DIR$/android_base/API/大整数.md" />
-      <change beforePath="" afterPath="$PROJECT_DIR$/android_base/深入理解Android自动化测试/CTS.md" />
-      <change beforePath="" afterPath="$PROJECT_DIR$/android_base/深入理解Android自动化测试/Info.md" />
-      <change beforePath="" afterPath="$PROJECT_DIR$/android_base/深入理解Android自动化测试/Instrumentation.md" />
-      <change beforePath="" afterPath="$PROJECT_DIR$/android_base/深入理解Android自动化测试/MonkeyRunner.md" />
-      <change beforePath="" afterPath="$PROJECT_DIR$/android_base/深入理解Android自动化测试/UIAutomator.md" />
-      <change beforePath="" afterPath="$PROJECT_DIR$/android_base/深入理解Android自动化测试/code/ExampleInstrumentedTest.java" />
-      <change beforePath="" afterPath="$PROJECT_DIR$/android_base/深入理解Android自动化测试/code/UiTest.java" />
-      <change beforePath="$PROJECT_DIR$/.idea/misc.xml" afterPath="$PROJECT_DIR$/.idea/misc.xml" />
+      <change beforePath="" afterPath="$PROJECT_DIR$/android_base/API/View及Event.md" />
+      <change beforePath="" afterPath="$PROJECT_DIR$/interview/view_x_y.png" />
       <change beforePath="$PROJECT_DIR$/.idea/workspace.xml" afterPath="$PROJECT_DIR$/.idea/workspace.xml" />
-      <change beforePath="$PROJECT_DIR$/Gradle/Chapter1" afterPath="$PROJECT_DIR$/gradle/Chapter1" />
-      <change beforePath="$PROJECT_DIR$/Gradle/Gradle" afterPath="$PROJECT_DIR$/gradle/Gradle" />
-      <change beforePath="$PROJECT_DIR$/Interview.md" afterPath="$PROJECT_DIR$/interview/Interview.md" />
-      <change beforePath="$PROJECT_DIR$/android_base/Android.md" afterPath="$PROJECT_DIR$/android_base/Android.md" />
-      <change beforePath="$PROJECT_DIR$/android_base/深入理解Android自动化测试/Input_bugben" afterPath="$PROJECT_DIR$/android_base/深入理解Android自动化测试/code/monkey_script" />
-      <change beforePath="$PROJECT_DIR$/android_base/深入理解Android自动化测试/Monkey.md" afterPath="$PROJECT_DIR$/android_base/深入理解Android自动化测试/Monkey.md" />
-      <change beforePath="$PROJECT_DIR$/android_base/深入解析Android5.0系统_刘超/Chapter13" afterPath="$PROJECT_DIR$/android_base/深入解析Android5.0系统_刘超/Chapter13" />
-      <change beforePath="$PROJECT_DIR$/android_base/深入解析Android5.0系统_刘超/Chapter9" afterPath="$PROJECT_DIR$/android_base/深入解析Android5.0系统_刘超/Chapter9" />
-      <change beforePath="$PROJECT_DIR$/third_party/alibaba_arouter.md" afterPath="$PROJECT_DIR$/third_tools/alibaba_arouter.md" />
-      <change beforePath="$PROJECT_DIR$/third_party/hotfix.md" afterPath="$PROJECT_DIR$/third_tools/hotfix.md" />
-      <change beforePath="$PROJECT_DIR$/third_party/jfrog_bintray.md" afterPath="$PROJECT_DIR$/third_tools/jfrog_bintray.md" />
+      <change beforePath="$PROJECT_DIR$/Project_Structure.md" afterPath="$PROJECT_DIR$/Project_Structure.md" />
+      <change beforePath="$PROJECT_DIR$/android_base/TechnicalTerm" afterPath="$PROJECT_DIR$/android_base/TechnicalTerm" />
+      <change beforePath="$PROJECT_DIR$/android_base/深入解析Android5.0系统_刘超/Chapter16" afterPath="$PROJECT_DIR$/android_base/深入解析Android5.0系统_刘超/Chapter16" />
+      <change beforePath="$PROJECT_DIR$/interview/Interview.md" afterPath="$PROJECT_DIR$/interview/Interview.md" />
     </list>
     <option name="EXCLUDED_CONVERTED_TO_IGNORED" value="true" />
     <option name="TRACKING_ENABLED" value="true" />
@@ -32,7 +18,73 @@
     <option name="LAST_RESOLUTION" value="IGNORE" />
   </component>
   <component name="FileEditorManager">
-    <leaf />
+    <leaf>
+      <file leaf-file-name="TechnicalTerm" pinned="false" current-in-tab="false">
+        <entry file="file://$PROJECT_DIR$/android_base/TechnicalTerm">
+          <provider selected="true" editor-type-id="split-provider[text-editor;markdown-preview-editor]">
+            <state split_layout="FIRST">
+              <first_editor relative-caret-position="144">
+                <caret line="8" column="6" lean-forward="false" selection-start-line="8" selection-start-column="6" selection-end-line="8" selection-end-column="6" />
+                <folding />
+              </first_editor>
+              <second_editor />
+            </state>
+          </provider>
+        </entry>
+      </file>
+      <file leaf-file-name="Interview.md" pinned="false" current-in-tab="false">
+        <entry file="file://$PROJECT_DIR$/interview/Interview.md">
+          <provider selected="true" editor-type-id="split-provider[text-editor;markdown-preview-editor]">
+            <state split_layout="FIRST">
+              <first_editor relative-caret-position="432">
+                <caret line="24" column="0" lean-forward="false" selection-start-line="24" selection-start-column="0" selection-end-line="24" selection-end-column="0" />
+                <folding />
+              </first_editor>
+              <second_editor />
+            </state>
+          </provider>
+        </entry>
+      </file>
+      <file leaf-file-name="View及Event.md" pinned="false" current-in-tab="false">
+        <entry file="file://$PROJECT_DIR$/android_base/API/View及Event.md">
+          <provider selected="true" editor-type-id="split-provider[text-editor;markdown-preview-editor]">
+            <state split_layout="FIRST">
+              <first_editor relative-caret-position="540">
+                <caret line="30" column="0" lean-forward="false" selection-start-line="30" selection-start-column="0" selection-end-line="30" selection-end-column="0" />
+                <folding />
+              </first_editor>
+              <second_editor />
+            </state>
+          </provider>
+        </entry>
+      </file>
+      <file leaf-file-name="Chapter7" pinned="false" current-in-tab="false">
+        <entry file="file://$PROJECT_DIR$/android_base/深入解析Android5.0系统_刘超/Chapter7">
+          <provider selected="true" editor-type-id="split-provider[text-editor;markdown-preview-editor]">
+            <state split_layout="SPLIT">
+              <first_editor relative-caret-position="0">
+                <caret line="0" column="0" lean-forward="false" selection-start-line="0" selection-start-column="0" selection-end-line="0" selection-end-column="0" />
+                <folding />
+              </first_editor>
+              <second_editor />
+            </state>
+          </provider>
+        </entry>
+      </file>
+      <file leaf-file-name="Chapter16" pinned="false" current-in-tab="true">
+        <entry file="file://$PROJECT_DIR$/android_base/深入解析Android5.0系统_刘超/Chapter16">
+          <provider selected="true" editor-type-id="split-provider[text-editor;markdown-preview-editor]">
+            <state split_layout="FIRST">
+              <first_editor relative-caret-position="108">
+                <caret line="6" column="9" lean-forward="false" selection-start-line="6" selection-start-column="9" selection-end-line="6" selection-end-column="9" />
+                <folding />
+              </first_editor>
+              <second_editor />
+            </state>
+          </provider>
+        </entry>
+      </file>
+    </leaf>
   </component>
   <component name="FindInProjectRecents">
     <findStrings>
@@ -41,9 +93,11 @@
       <find>FF</find>
       <find>位运算</find>
       <find>ff</find>
+      <find>输入</find>
     </findStrings>
     <dirStrings>
       <dir>$PROJECT_DIR$</dir>
+      <dir>$PROJECT_DIR$/android_base/深入解析Android5.0系统_刘超</dir>
     </dirStrings>
   </component>
   <component name="Git.Settings">
@@ -57,7 +111,6 @@
   <component name="IdeDocumentHistory">
     <option name="CHANGED_PATHS">
       <list>
-        <option value="$PROJECT_DIR$/Gradle" />
         <option value="$PROJECT_DIR$/ide/connect_time_out.md" />
         <option value="$PROJECT_DIR$/third_party/arouter.md" />
         <option value="$PROJECT_DIR$/gradle.md" />
@@ -87,7 +140,6 @@
         <option value="$PROJECT_DIR$/Gradle/Gradle_Build.md" />
         <option value="$PROJECT_DIR$/Gradle/Gradle" />
         <option value="$PROJECT_DIR$/Gradle/Chapter1" />
-        <option value="$PROJECT_DIR$/android_base/TechnicalTerm" />
         <option value="$PROJECT_DIR$/android_base/Init.md" />
         <option value="$PROJECT_DIR$/android_base/深入解析Android5.0系统_刘超/Chapter24" />
         <option value="$PROJECT_DIR$/android_base/深入解析Android5.0系统_刘超/Chapter23" />
@@ -105,6 +157,11 @@
         <option value="$PROJECT_DIR$/android_base/深入解析Android5.0系统_刘超/Chapter13" />
         <option value="$PROJECT_DIR$/java_base/面试题含答案" />
         <option value="$PROJECT_DIR$/java_base/HelloWorld" />
+        <option value="$PROJECT_DIR$/Project_Structure.md" />
+        <option value="$PROJECT_DIR$/android_base/TechnicalTerm" />
+        <option value="$PROJECT_DIR$/interview/Interview.md" />
+        <option value="$PROJECT_DIR$/android_base/API/View及Event.md" />
+        <option value="$PROJECT_DIR$/android_base/深入解析Android5.0系统_刘超/Chapter16" />
       </list>
     </option>
   </component>
@@ -140,7 +197,46 @@
             <path>
               <item name="MarkNote" type="b2602c69:ProjectViewProjectNode" />
               <item name="MarkNote" type="462c0819:PsiDirectoryNode" />
+              <item name="android_base" type="462c0819:PsiDirectoryNode" />
+            </path>
+            <path>
+              <item name="MarkNote" type="b2602c69:ProjectViewProjectNode" />
+              <item name="MarkNote" type="462c0819:PsiDirectoryNode" />
+              <item name="android_base" type="462c0819:PsiDirectoryNode" />
+              <item name="API" type="462c0819:PsiDirectoryNode" />
+            </path>
+            <path>
+              <item name="MarkNote" type="b2602c69:ProjectViewProjectNode" />
+              <item name="MarkNote" type="462c0819:PsiDirectoryNode" />
+              <item name="android_base" type="462c0819:PsiDirectoryNode" />
+              <item name="深入理解Android卷系列_邓凡平" type="462c0819:PsiDirectoryNode" />
+            </path>
+            <path>
+              <item name="MarkNote" type="b2602c69:ProjectViewProjectNode" />
+              <item name="MarkNote" type="462c0819:PsiDirectoryNode" />
+              <item name="android_base" type="462c0819:PsiDirectoryNode" />
+              <item name="深入理解Android自动化测试" type="462c0819:PsiDirectoryNode" />
+            </path>
+            <path>
+              <item name="MarkNote" type="b2602c69:ProjectViewProjectNode" />
+              <item name="MarkNote" type="462c0819:PsiDirectoryNode" />
+              <item name="android_base" type="462c0819:PsiDirectoryNode" />
+              <item name="深入解析Android5.0系统_刘超" type="462c0819:PsiDirectoryNode" />
+            </path>
+            <path>
+              <item name="MarkNote" type="b2602c69:ProjectViewProjectNode" />
+              <item name="MarkNote" type="462c0819:PsiDirectoryNode" />
+              <item name="interview" type="462c0819:PsiDirectoryNode" />
+            </path>
+            <path>
+              <item name="MarkNote" type="b2602c69:ProjectViewProjectNode" />
+              <item name="MarkNote" type="462c0819:PsiDirectoryNode" />
               <item name="java_base" type="462c0819:PsiDirectoryNode" />
+            </path>
+            <path>
+              <item name="MarkNote" type="b2602c69:ProjectViewProjectNode" />
+              <item name="MarkNote" type="462c0819:PsiDirectoryNode" />
+              <item name="third_tools" type="462c0819:PsiDirectoryNode" />
             </path>
           </expand>
           <select />
@@ -162,19 +258,19 @@
     <property name="project.structure.side.proportion" value="0.0" />
   </component>
   <component name="RecentsManager">
+    <key name="CopyFile.RECENT_KEYS">
+      <recent name="$PROJECT_DIR$/android_base/API" />
+      <recent name="$PROJECT_DIR$/java_base" />
+      <recent name="$PROJECT_DIR$/android_base/深入解析Android5.0系统_刘超" />
+      <recent name="$PROJECT_DIR$/android_base" />
+      <recent name="$PROJECT_DIR$/android_base/深入理解Android自动化测试/code" />
+    </key>
     <key name="MoveFile.RECENT_KEYS">
       <recent name="$PROJECT_DIR$/interview" />
       <recent name="$PROJECT_DIR$/android_base/深入理解Android自动化测试/code" />
       <recent name="$PROJECT_DIR$/android_base/深入理解Android自动化测试" />
       <recent name="$PROJECT_DIR$/Gradle" />
       <recent name="$PROJECT_DIR$/android_base" />
-    </key>
-    <key name="CopyFile.RECENT_KEYS">
-      <recent name="$PROJECT_DIR$/java_base" />
-      <recent name="$PROJECT_DIR$/android_base/深入解析Android5.0系统_刘超" />
-      <recent name="$PROJECT_DIR$/android_base" />
-      <recent name="$PROJECT_DIR$/android_base/深入理解Android自动化测试/code" />
-      <recent name="$PROJECT_DIR$/android_base/深入理解Android自动化测试" />
     </key>
   </component>
   <component name="RunDashboard">
@@ -295,6 +391,7 @@
   </component>
   <component name="ToolWindowManager">
     <frame x="65" y="-4" width="1855" height="1084" extended-state="6" />
+    <editor active="true" />
     <layout>
       <window_info id="TODO" active="false" anchor="bottom" auto_hide="false" internal_type="DOCKED" type="DOCKED" visible="false" show_stripe_button="true" weight="0.3297414" sideWeight="0.49806094" order="6" side_tool="false" content_ui="tabs" />
       <window_info id="Palette&#9;" active="false" anchor="right" auto_hide="false" internal_type="DOCKED" type="DOCKED" visible="false" show_stripe_button="true" weight="0.33" sideWeight="0.5" order="5" side_tool="false" content_ui="tabs" />
@@ -306,7 +403,7 @@
       <window_info id="Terminal" active="false" anchor="bottom" auto_hide="false" internal_type="DOCKED" type="DOCKED" visible="false" show_stripe_button="true" weight="0.32963374" sideWeight="0.5" order="11" side_tool="false" content_ui="tabs" />
       <window_info id="Capture Tool" active="false" anchor="left" auto_hide="false" internal_type="DOCKED" type="DOCKED" visible="false" show_stripe_button="true" weight="0.33" sideWeight="0.5" order="4" side_tool="false" content_ui="tabs" />
       <window_info id="Designer" active="false" anchor="left" auto_hide="false" internal_type="DOCKED" type="DOCKED" visible="false" show_stripe_button="true" weight="0.33" sideWeight="0.5" order="5" side_tool="false" content_ui="tabs" />
-      <window_info id="Project" active="true" anchor="left" auto_hide="false" internal_type="DOCKED" type="DOCKED" visible="true" show_stripe_button="true" weight="0.11359913" sideWeight="0.5" order="0" side_tool="false" content_ui="combo" />
+      <window_info id="Project" active="false" anchor="left" auto_hide="false" internal_type="DOCKED" type="DOCKED" visible="true" show_stripe_button="true" weight="0.1507373" sideWeight="0.5" order="0" side_tool="false" content_ui="combo" />
       <window_info id="Find" active="false" anchor="bottom" auto_hide="false" internal_type="DOCKED" type="DOCKED" visible="false" show_stripe_button="true" weight="0.28771552" sideWeight="0.49584487" order="1" side_tool="false" content_ui="tabs" />
       <window_info id="Structure" active="false" anchor="left" auto_hide="false" internal_type="DOCKED" type="DOCKED" visible="false" show_stripe_button="true" weight="0.25" sideWeight="0.5" order="1" side_tool="false" content_ui="tabs" />
       <window_info id="Theme Preview" active="false" anchor="right" auto_hide="false" internal_type="DOCKED" type="DOCKED" visible="false" show_stripe_button="true" weight="0.33" sideWeight="0.5" order="7" side_tool="false" content_ui="tabs" />
@@ -364,41 +461,6 @@
     <watches-manager />
   </component>
   <component name="editorHistoryManager">
-    <entry file="file://$PROJECT_DIR$/WWW_Web.md">
-      <provider editor-type-id="text-editor">
-        <state relative-caret-position="0">
-          <caret line="0" column="0" lean-forward="false" selection-start-line="0" selection-start-column="0" selection-end-line="0" selection-end-column="0" />
-        </state>
-      </provider>
-      <provider selected="true" editor-type-id="split-provider[text-editor;markdown-preview-editor]">
-        <state split_layout="FIRST">
-          <first_editor relative-caret-position="0">
-            <caret line="0" column="2" lean-forward="true" selection-start-line="0" selection-start-column="2" selection-end-line="0" selection-end-column="2" />
-          </first_editor>
-          <second_editor />
-        </state>
-      </provider>
-    </entry>
-    <entry file="file://$PROJECT_DIR$/Life_Note.md">
-      <provider selected="true" editor-type-id="split-provider[text-editor;markdown-preview-editor]">
-        <state split_layout="FIRST">
-          <first_editor relative-caret-position="144">
-            <caret line="8" column="18" lean-forward="true" selection-start-line="8" selection-start-column="18" selection-end-line="8" selection-end-column="18" />
-          </first_editor>
-          <second_editor />
-        </state>
-      </provider>
-    </entry>
-    <entry file="file://$PROJECT_DIR$/android_base/深入解析Android5.0系统_刘超/Chapter14">
-      <provider selected="true" editor-type-id="split-provider[text-editor;markdown-preview-editor]">
-        <state split_layout="FIRST">
-          <first_editor relative-caret-position="629">
-            <caret line="57" column="35" lean-forward="false" selection-start-line="57" selection-start-column="25" selection-end-line="57" selection-end-column="35" />
-          </first_editor>
-          <second_editor />
-        </state>
-      </provider>
-    </entry>
     <entry file="file://$PROJECT_DIR$/Gradle/Gradle_Build.md" />
     <entry file="file://$PROJECT_DIR$/gradle/Gradle">
       <provider selected="true" editor-type-id="text-editor">
@@ -433,26 +495,6 @@
       </provider>
     </entry>
     <entry file="file://$PROJECT_DIR$/android_base/深入理解Android卷系列_邓凡平/Readme.md" />
-    <entry file="file://$PROJECT_DIR$/Terminal_Command.md">
-      <provider selected="true" editor-type-id="split-provider[text-editor;markdown-preview-editor]">
-        <state split_layout="SPLIT">
-          <first_editor relative-caret-position="0">
-            <caret line="0" column="0" lean-forward="false" selection-start-line="0" selection-start-column="0" selection-end-line="0" selection-end-column="0" />
-          </first_editor>
-          <second_editor />
-        </state>
-      </provider>
-    </entry>
-    <entry file="file://$PROJECT_DIR$/android_base/TechnicalTerm">
-      <provider selected="true" editor-type-id="split-provider[text-editor;markdown-preview-editor]">
-        <state split_layout="SPLIT">
-          <first_editor relative-caret-position="72">
-            <caret line="4" column="10" lean-forward="false" selection-start-line="4" selection-start-column="10" selection-end-line="4" selection-end-column="10" />
-          </first_editor>
-          <second_editor />
-        </state>
-      </provider>
-    </entry>
     <entry file="file://$PROJECT_DIR$/android_base/Jni.md">
       <provider selected="true" editor-type-id="split-provider[text-editor;markdown-preview-editor]">
         <state split_layout="FIRST">
@@ -556,16 +598,6 @@
       </provider>
     </entry>
     <entry file="file://$PROJECT_DIR$/android_base/深入解析Android5.0系统_刘超/Chapter8">
-      <provider selected="true" editor-type-id="split-provider[text-editor;markdown-preview-editor]">
-        <state split_layout="SPLIT">
-          <first_editor relative-caret-position="0">
-            <caret line="0" column="0" lean-forward="false" selection-start-line="0" selection-start-column="0" selection-end-line="0" selection-end-column="0" />
-          </first_editor>
-          <second_editor />
-        </state>
-      </provider>
-    </entry>
-    <entry file="file://$PROJECT_DIR$/android_base/深入解析Android5.0系统_刘超/Chapter7">
       <provider selected="true" editor-type-id="split-provider[text-editor;markdown-preview-editor]">
         <state split_layout="SPLIT">
           <first_editor relative-caret-position="0">
@@ -736,26 +768,6 @@
         </state>
       </provider>
     </entry>
-    <entry file="file://$PROJECT_DIR$/interview/Interview.md">
-      <provider selected="true" editor-type-id="split-provider[text-editor;markdown-preview-editor]">
-        <state split_layout="FIRST">
-          <first_editor relative-caret-position="306">
-            <caret line="17" column="0" lean-forward="true" selection-start-line="17" selection-start-column="0" selection-end-line="17" selection-end-column="0" />
-          </first_editor>
-          <second_editor />
-        </state>
-      </provider>
-    </entry>
-    <entry file="file://$PROJECT_DIR$/Project_Structure.md">
-      <provider selected="true" editor-type-id="split-provider[text-editor;markdown-preview-editor]">
-        <state split_layout="FIRST">
-          <first_editor relative-caret-position="0">
-            <caret line="0" column="14" lean-forward="false" selection-start-line="0" selection-start-column="14" selection-end-line="0" selection-end-column="14" />
-          </first_editor>
-          <second_editor />
-        </state>
-      </provider>
-    </entry>
     <entry file="file://$PROJECT_DIR$/android_base/Android.md">
       <provider selected="true" editor-type-id="split-provider[text-editor;markdown-preview-editor]">
         <state split_layout="SPLIT">
@@ -800,16 +812,6 @@
         </state>
       </provider>
     </entry>
-    <entry file="file://$PROJECT_DIR$/android_base/API/大整数.md">
-      <provider selected="true" editor-type-id="split-provider[text-editor;markdown-preview-editor]">
-        <state split_layout="FIRST">
-          <first_editor relative-caret-position="72">
-            <caret line="4" column="0" lean-forward="false" selection-start-line="4" selection-start-column="0" selection-end-line="4" selection-end-column="0" />
-          </first_editor>
-          <second_editor />
-        </state>
-      </provider>
-    </entry>
     <entry file="file://$PROJECT_DIR$/java_base/面试题" />
     <entry file="file://$PROJECT_DIR$/java_base/面试题含答案" />
     <entry file="file://$PROJECT_DIR$/java_base/chapter2.md">
@@ -824,6 +826,110 @@
       </provider>
     </entry>
     <entry file="file://$PROJECT_DIR$/java_base/HelloWorld" />
+    <entry file="file://$PROJECT_DIR$/WWW_Web.md">
+      <provider editor-type-id="text-editor">
+        <state relative-caret-position="0">
+          <caret line="0" column="0" lean-forward="false" selection-start-line="0" selection-start-column="0" selection-end-line="0" selection-end-column="0" />
+        </state>
+      </provider>
+      <provider selected="true" editor-type-id="split-provider[text-editor;markdown-preview-editor]">
+        <state split_layout="FIRST">
+          <first_editor relative-caret-position="0">
+            <caret line="0" column="2" lean-forward="true" selection-start-line="0" selection-start-column="2" selection-end-line="0" selection-end-column="2" />
+            <folding />
+          </first_editor>
+          <second_editor />
+        </state>
+      </provider>
+    </entry>
+    <entry file="file://$PROJECT_DIR$/Terminal_Command.md">
+      <provider selected="true" editor-type-id="split-provider[text-editor;markdown-preview-editor]">
+        <state split_layout="SPLIT">
+          <first_editor relative-caret-position="0">
+            <caret line="0" column="0" lean-forward="false" selection-start-line="0" selection-start-column="0" selection-end-line="0" selection-end-column="0" />
+            <folding />
+          </first_editor>
+          <second_editor />
+        </state>
+      </provider>
+    </entry>
+    <entry file="file://$PROJECT_DIR$/Project_Structure.md">
+      <provider selected="true" editor-type-id="split-provider[text-editor;markdown-preview-editor]">
+        <state split_layout="FIRST">
+          <first_editor relative-caret-position="18">
+            <caret line="1" column="0" lean-forward="false" selection-start-line="1" selection-start-column="0" selection-end-line="1" selection-end-column="0" />
+            <folding />
+          </first_editor>
+          <second_editor />
+        </state>
+      </provider>
+    </entry>
+    <entry file="file://$PROJECT_DIR$/android_base/API/大整数.md">
+      <provider selected="true" editor-type-id="split-provider[text-editor;markdown-preview-editor]">
+        <state split_layout="FIRST">
+          <first_editor relative-caret-position="72">
+            <caret line="4" column="0" lean-forward="false" selection-start-line="4" selection-start-column="0" selection-end-line="4" selection-end-column="0" />
+            <folding />
+          </first_editor>
+          <second_editor />
+        </state>
+      </provider>
+    </entry>
+    <entry file="file://$PROJECT_DIR$/android_base/TechnicalTerm">
+      <provider selected="true" editor-type-id="split-provider[text-editor;markdown-preview-editor]">
+        <state split_layout="FIRST">
+          <first_editor relative-caret-position="144">
+            <caret line="8" column="6" lean-forward="false" selection-start-line="8" selection-start-column="6" selection-end-line="8" selection-end-column="6" />
+            <folding />
+          </first_editor>
+          <second_editor />
+        </state>
+      </provider>
+    </entry>
+    <entry file="file://$PROJECT_DIR$/interview/Interview.md">
+      <provider selected="true" editor-type-id="split-provider[text-editor;markdown-preview-editor]">
+        <state split_layout="FIRST">
+          <first_editor relative-caret-position="432">
+            <caret line="24" column="0" lean-forward="false" selection-start-line="24" selection-start-column="0" selection-end-line="24" selection-end-column="0" />
+            <folding />
+          </first_editor>
+          <second_editor />
+        </state>
+      </provider>
+    </entry>
+    <entry file="file://$PROJECT_DIR$/android_base/深入解析Android5.0系统_刘超/Chapter7">
+      <provider selected="true" editor-type-id="split-provider[text-editor;markdown-preview-editor]">
+        <state split_layout="SPLIT">
+          <first_editor relative-caret-position="0">
+            <caret line="0" column="0" lean-forward="false" selection-start-line="0" selection-start-column="0" selection-end-line="0" selection-end-column="0" />
+            <folding />
+          </first_editor>
+          <second_editor />
+        </state>
+      </provider>
+    </entry>
+    <entry file="file://$PROJECT_DIR$/android_base/API/View及Event.md">
+      <provider selected="true" editor-type-id="split-provider[text-editor;markdown-preview-editor]">
+        <state split_layout="FIRST">
+          <first_editor relative-caret-position="540">
+            <caret line="30" column="0" lean-forward="false" selection-start-line="30" selection-start-column="0" selection-end-line="30" selection-end-column="0" />
+            <folding />
+          </first_editor>
+          <second_editor />
+        </state>
+      </provider>
+    </entry>
+    <entry file="file://$PROJECT_DIR$/android_base/深入解析Android5.0系统_刘超/Chapter16">
+      <provider selected="true" editor-type-id="split-provider[text-editor;markdown-preview-editor]">
+        <state split_layout="FIRST">
+          <first_editor relative-caret-position="108">
+            <caret line="6" column="9" lean-forward="false" selection-start-line="6" selection-start-column="9" selection-end-line="6" selection-end-column="9" />
+            <folding />
+          </first_editor>
+          <second_editor />
+        </state>
+      </provider>
+    </entry>
   </component>
   <component name="masterDetails">
     <states>

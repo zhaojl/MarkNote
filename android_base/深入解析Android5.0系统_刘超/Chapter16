@@ -1,7 +1,23 @@
 第16章 Android的输入管理
 
+系统输入事件及分发详解
+https://www.cnblogs.com/xdlltao/p/5833253.html
 
-.
+
+Android的input事件输入系统
+
+输入事件是计算机设备接收到的输入信息  
+Object -> InputEvent                //输入事件的公共基类
+                     -> KeyEvent    //用于报告键盘和按钮点击事件
+                     -> MotionEvent //用于报告移动(鼠标,笔,手指,轨迹球)事件, 运动事件可能持有相对或者绝对的移动和其它数据,依赖于设备的类型
+这3个类的定义如下:
+    public abstract class InputEvent implements Parcelable {
+    public class KeyEvent extends InputEvent implements Parcelable {
+    public final class MotionEvent extends InputEvent implements Parcelable {
+其中MotionEvent类的概述如下:
+     * Motion events describe movements in terms of an action code and a set of axis values.
+     * The action code specifies the state change that occurred such as a pointer going
+     * down or up.  The axis values describe the position and other movement properties.
 
 
 
