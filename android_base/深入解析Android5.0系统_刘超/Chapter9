@@ -1,5 +1,6 @@
 第9章 精确地控制资源的使用——Android的资源管理
 
+SystemService的所有子类
 
 Android的优势之一是它几乎能运行在任何尺寸的设备上, 小到手表, 大到电视, 还有各种分辨率和像素密度的手机或平板电脑.
 但是这也给应用开发带来了不小的挑战, 为了能让同一个apk正常运行在不同的设备上, Android的设计者煞费苦心的设计了一套资源管理系统来完成目标.  
@@ -12,24 +13,87 @@ Android并不是简单的将UI布局和图片进行扩大或缩小来匹配不�
 
 本章将详细介绍Android资源管理的各种概念,定义,原理和算法.  
 
+
+
 9.1 资源系统简介  
-    9.1.1 缺省资源和候选资源  
-    提供缺省资源的目的是为了让应用在一些没有测试过的设备上也能正常工作.  
-    提供候选资源的目的是为了完成更好的用户体验而存在的. 开发人员针对每种设备都提供最合适的资源,然后系统运行时自动挑选合适的资源使用.  
-    选取和设备匹配的候选资源除了根据一些固定不变的参数,如屏幕大小,有无键盘等, 还会考虑很多动态的系统属性, 例如屏幕方向,当前语言,白天黑夜等,利用这些信息程序员能开发出很多有特色的应用, 例如支持夜间模式的UI.  
-    9.1.2 常用术语和单位
-    屏幕尺寸(Screen size): 指屏幕的对角线的长度, 单位是英寸, 1英寸=2.54厘米.  
-    屏幕分辨率(Screen resolution): 以像素为单位的屏幕大小, 单位是px, 1px=1个像素点, 表示为水平像素个数x垂直像素个数, 如1080x1920.  
-    屏幕密度(Screen density): 指每英寸上的像素个数, 单位是dpi(dots per inch).
+  9.1.1 缺省资源和候选资源  
+    1.提供缺省资源的目的是为了让应用在一些没有测试过的设备上也能正常工作.  
+    2.提供候选资源的目的是为了完成更好的用户体验而存在的, 开发人员针对每种设备都提供最合适的资源,然后系统运行时自动挑选合适的资源使用.  
+    3.选取和设备匹配的候选资源除了根据一些固定不变的参数,如屏幕大小,有无键盘等, 还会考虑很多动态的系统属性, 例如屏幕方向,当前语言,白天黑夜等,利用这些信息程序员能开发出很多有特色的应用, 例如支持夜间模式的UI.  
+    
+  9.1.2 常用术语和单位
+    1.屏幕尺寸(Screen size): 指屏幕的对角线的长度, 单位是英寸, 1英寸=2.54厘米.  
+    2.屏幕分辨率(Screen resolution): 以像素为单位的屏幕大小, 单位是px, 1px=1个像素点, 表示为水平像素个数x垂直像素个数, 如1080x1920.  
+    3.屏幕密度(Screen density): 指每英寸上的像素个数, 单位是dpi(dots per inch).
        注意:
            dpi与屏幕尺寸、屏幕分辨率有关, 在单一变化条件下,屏幕尺寸越小,分辨率越高,像素密度越大,反之越小.
            Android把屏幕密度归为6类: ldpi、mdpi、hdpi、xdpi、xxdpi、xxxdpi. 
-    方向(Orientation): 手持设备横屏,竖屏, 随用户转动设备发生变化.
+    4.方向(Orientation): 用户看到的屏幕方向, 横屏/竖屏, 随用户转动设备发生变化.
+    dp(density-independent pixel): 就是与设备的屏幕密度无关的像素, 简称设备无关像素, 用dp的目的就是为了让ui在不同的设备上看起来大小一样.
+    px(pixel):
+    sp(scale-independent pixel): 与缩放无关的像素, 多用来表示字体大小, Android在系统配置中定义一个scale值, sp=dp*scale,通常scale等于1.
+       注意:
+           1.但是Android允许用户自定义文字尺寸,设置中小,正常,大,超大等, 设置完字体大小后,scale的值就会变化, 最后的效果是在UI布局不变的情况下,显示的字体会放大或缩小.
+           2.这也提醒我们,layout文件中View的宽高不要写成固定值,否则当字体改变时出现空间不匹配问题.
+    mm: 毫米
+    in: 英寸, 1英寸=2.54厘米
+    pt: 点, 1pt=1/72英寸
     
+  9.1.3 资源类型
+  9.1.4 系统资源定义
+     1.定义属性
+       在sourcecode/frameworks/base/core/res/res/values目录下attrs.xml和attrs_manifest.xml文件里, Android定义了资源的各种属性名称和属性值类型:
+            <declare-styleable name="View">
+            <declare-styleable name="ViewGroup">
+            <declare-styleable name="LinearLayout">
+            <declare-styleable name="RelativeLayout">
+       在LinearLayout构造函数中, 代码如下:
+           public LinearLayout(Context context, AttributeSet attrs, int defStyleAttr, int defStyleRes) {
+               super(context, attrs, defStyleAttr, defStyleRes);
+               //调用obtainStyledAttributes来创建一个属性集合, 传入的参数是attrs.xml文件中<declare-styleable>标签定义的属性集合名称
+               final TypedArray a = context.obtainStyledAttributes(attrs, com.android.internal.R.styleable.LinearLayout, defStyleAttr, defStyleRes);
+               //读取每个属性值时, 都会给出一个缺省值
+               int index = a.getInt(com.android.internal.R.styleable.LinearLayout_orientation, -1);
+               if (index >= 0) {
+                   setOrientation(index);
+               }
+               //读取每个属性值时, 都会给出一个缺省值
+               index = a.getInt(com.android.internal.R.styleable.LinearLayout_gravity, -1);
+               if (index >= 0) {
+                   setGravity(index);
+               }
+           }
+       注:
+          1.defStyleAttr参数的作用是指定使用的style, style就是一些预定义的属性值集合, 例如: style="@style/Widget.Material.Notification.Text".
+          2.为什么style的名称要用点分割, Android用这种方式表示一种继承关系, 上面例子的含义是style"Widget.Material"继承了style"Widget"的所有属性值.
+          3.除了通过名字来表示继承关系外, 还可以通过在style中定义parent来指定, 例如: <style name="Widget.ExpandableListView" parent="Widget.ListView">
+     2.给属性赋值
+     3.主题Theme
+        Theme就是所有UI属性的合集, theme的定义在themes.xml文件中, 还有themes_device_defaults.xml,themes_holo.xml,themes_leanback.xml,themes_material.xml文件.
+        Android的Theme仅仅是一套UI属性的集合(不像其他系统中的全局主题概念).
+  
+9.2 Android 资源的制作  
+  9.2.1 资源的存储目录
+    1.asset目录
+    2.res目录
     
-    
+  9.2.2 候选资源目录的命名规则
+  9.2.3 资源匹配算法
 
 
+9.2 Android 资源的使用  
+  9.3.1 常规的资源使用方法
+    1.在java代码中使用资源
+    2.在xml文件中使用资源
+    
+  9.3.2 使用公开和非公开资源
+  9.3.3 图片资源的缩放问题
+    1.图片缩放后对齐的问题
+    2.NinePatch图片的缩放
+    3.为图片指定density
+    
+    
+    
 
 https://blog.csdn.net/zhaoyw2008/article/details/46008513
 https://www.cnblogs.com/soaringEveryday/p/4835839.html

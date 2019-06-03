@@ -1,4 +1,4 @@
-**深入理解Android自动化测试（许奔）第二章 稳定性测试利器-monkey使用详解**
+**1 稳定性测试利器-monkey使用详解**
 
 
 要想发布新版本, 得先通过稳定性测试, 要想通过稳定性测试, 得先通过monkey.
@@ -192,10 +192,10 @@ monkey可以运行在模拟器或实际设备中, 它向系统发送伪随机的
         #点击提交  
         captureDispatchPointer(10,10,0,300,720,1,1,-1,1,1,0,0)  
         captureDispatchPointer(10,10,1,300,720,1,1,-1,1,1,0,0)  
-    $ touch Input_bugben  
-    $ adb shell rm /mnt/sdcard/Input_bugben  
-    $ adb push Input_bugben /mnt/sdcard/Input_bugben  
-    $ adb shell monkey -v -f /mnt/sdcard/Input_bugben 10  
+    $ touch monkey_script  
+    $ adb shell rm /mnt/sdcard/monkey_script  
+    $ adb push Input_bugben /mnt/sdcard/monkey_script  
+    $ adb shell monkey -v -f /mnt/sdcard/monkey_script 10  
     
 
 **getevent/sendevent 和 input keyevent**  

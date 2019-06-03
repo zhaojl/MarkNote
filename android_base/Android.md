@@ -2,8 +2,8 @@ https://developer.android.google.cn
 https://www.developer.com/
 
 
-<<<<<<< HEAD
-/data/system/packages.xml    
+优秀实践:  
+    ~/sourcecode/vendor/**/packages/apps/**CarRegister
 
 
 
@@ -24,6 +24,6 @@ https://www.cnblogs.com/soaringEveryday/p/4835839.html
 
 熟悉 Android 系统，熟悉 Android 软件的开发、测试、分发流程
 熟悉 Java 语言且理解虚拟机原理
-=======
+
+
 /data/system/packages.xml    
->>>>>>> 2f289295a7bee3b9a989b1c4b9e7fe0cf492964d
