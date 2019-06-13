@@ -1,31 +1,483 @@
-第18章 Android的存储系统
-
-
-.
+第18章 Android 的存储系统
 
 
 
+Android 的存储系统主要由 SystemServer 进程中的 MountService 和 Vold 进程中的 VolumeManager 组成, 它们管理着系统的存储设备, 执行各种操作, 包括 mount,unmount,format等.
+在Android的存储系统中, MountService 是为应用提供服务的Binder类,运行在SystemServer中, 而StorageManager是MountServer的代理,在用户进程中使用的.
+Vold 是一个守护进程负责和底层存储系统的驱动交互, MountService和Vold之间通过socket进行通信, 这个通信过程是双向的, 有从MountService到Vold的操作命令, 也有从Vold到MountService的消息, 用来通知底层硬件发生了变化.
+Vold 进程的主体是VolumeManager对象, 它管理着系统底层所有的Volume对象, 实现各种存储相关的操作, Vold中CommandListener对象负责和 MountService 中的 NativeDemonConnector 进行socket 通信, 而NetlinkHandler对象则负责监听来自驱动的NetlinkSocket消息.
+NetlinkManager对象的主要作用是创建3个NetlinkHandler对象, 除此外, NetlinkManager对象在系统运行过程中几乎毫无作用.
+
+
+vold:跟fw通信方式，由socket调整为binder方式，用于提高性能；这是继installerd之后的再一次由socket转变成binder模块；
+Socket方式更多的用于Android framework层与native层之间的通信.
+Binder/Socket用于进程间通信，而Handler消息机制用于同进程的线程间通信，Handler消息机制是由一组MessageQueue、Message、Looper、Handler共同组成的，为了方便且称之为Handler消息机制。
+
+
+涉及的源码路径
+/system/vold/vold.rc
+/system/vold/vdc.rc
+/system/vold/wait_for_keymaster.rc
+/system/vold/NetlinkHandler.cpp
+/system/vold/NetlinkHandler.h
+/system/vold/NetlinkManager.cpp
+/system/vold/NetlinkManager.h
+/system/vold/VolumeManager.cpp
+/system/vold/VolumeManager.h
+
+
+
+18.1 管理存储设备 - Vold 守护进程
+    Vold 的全称是 Volume Daemon, 用来管理各种存储设备, 包括外置 USB 和 SD 卡设备, MountService通过Vold进程查询和操作这些存储设备.
+    如果外部存储设备发生变化, 例如, 插入了USB设备, Vold 将会接收到内核的 UEvent 消息并转发给 MountService.
+
+
+18.1.1 Vold 的 main 函数
+    Vold 也是通过 init 进程启动, 它在/system/vold/vold.rc中的定义如下:
+        service vold /system/bin/vold \
+            --blkid_context=u:r:blkid:s0 --blkid_untrusted_context=u:r:blkid_untrusted:s0 \
+            --fsck_context=u:r:fsck:s0 --fsck_untrusted_context=u:r:fsck_untrusted:s0
+        class core
+        ioprio be 2
+        writepid /dev/cpuset/foreground/tasks
+        shutdown critical
+        group reserved_disk
+    注:
+        Vold 服务属于 core 分组, 这就意味着系统启动时它就会被init进程启动.
+        同时要注意这里定义一个socket, 这种定义socket的方式前面已经讲过很多次了, 它主要用于 C++层的 Vold 和Java层的 MountService 通信.
+
+    下面看 vold 模块的入口 main() 函数在 /system/vold/main.cpp 文件中的代码:
+        int main(int argc, char** argv) {
+            atrace_set_tracing_enabled(false);
+            setenv("ANDROID_LOG_TAGS", "*:v", 1);
+            android::base::InitLogging(argv, android::base::LogdLogger(android::base::SYSTEM));
+
+            VolumeManager *vm;
+            NetlinkManager *nm;
+
+            parse_args(argc, argv);
+
+            sehandle = selinux_android_file_context_handle();
+            if (sehandle) {
+                selinux_android_set_sehandle(sehandle);
+            }
+
+            mkdir("/dev/block/vold", 0755);     //创建 vold 目录
+
+            // 创建VolumeManager对象, 单例, Create our singleton managers
+            if (!(vm = VolumeManager::Instance())) {
+                exit(1);
+            }
+            // 创建 NetlinkManager
+
+            if (!(nm = NetlinkManager::Instance())) {
+                exit(1);
+            }
+            if (android::base::GetBoolProperty("vold.debug", false)) {
+                vm->setDebug(true);
+            }
+            if (vm->start()) {  //启动 VolumeManager
+                exit(1);
+            }
+
+            bool has_adoptable;
+            bool has_quota;
+            bool has_reserved;
+            if (process_config(vm, &has_adoptable, &has_quota, &has_reserved)) {
+                // 打印Log
+            }
+            if (android::vold::VoldNativeService::start() != android::OK) {
+                exit(1);
+            }
+            if (nm->start()) {  //启动 NetlinkManager
+                exit(1);
+            }
+
+            // This call should go after listeners are started to avoid a deadlock between vold and init (see b/34278978 for details)
+            android::base::SetProperty("vold.has_adoptable", has_adoptable ? "1" : "0");
+            android::base::SetProperty("vold.has_quota", has_quota ? "1" : "0");
+            android::base::SetProperty("vold.has_reserved", has_reserved ? "1" : "0");
+
+            // Do coldboot here so it won't block booting, also the cold boot is needed in case we have flash drive connected before Vold launched
+            coldboot("/sys/block");  //创建"/sys/block"下的节点文件
+
+            android::IPCThreadState::self()->joinThreadPool();  // joinThreadPool()
+
+            exit(0);    //主线程进入睡眠
+        }
+
+
+
+18.1.2 监听驱动发出的消息 - Vold 的 NetlinkManager 对象
+    NetlinkManager 对象的主要工作是监听驱动发出的 uevent 消息.
+
+    下面看 NetlinkManager 的 Instance()函数在 /system/vold/NetlinkManager.cpp 文件中的代码如下:
+        NetlinkManager *NetlinkManager::sInstance = NULL;
+        NetlinkManager *NetlinkManager::Instance() {
+            if (!sInstance)
+                sInstance = new NetlinkManager();
+            return sInstance;
+        }
+        注:
+            Vold 进程中只会有一个 NetlinkManager 对象.
+
+    下面看 NetlinkManager 的构造函数在 /system/vold/NetlinkManager.cpp 文件中的代码如下:
+        NetlinkManager::NetlinkManager() {
+            mBroadcaster = NULL;
+        }
+
+    下面看 start() 的函数在 /system/vold/NetlinkManager.cpp 文件中的代码如下:
+        int NetlinkManager::start() {
+            struct sockaddr_nl nladdr;
+            int sz = 64 * 1024;
+            int on = 1;
+
+            memset(&nladdr, 0, sizeof(nladdr));
+            nladdr.nl_family = AF_NETLINK;
+            nladdr.nl_pid = getpid();
+            nladdr.nl_groups = 0xffffffff;  //指定加入的多播组
+
+            //创建 socket
+            if ((mSock = socket(PF_NETLINK, SOCK_DGRAM | SOCK_CLOEXEC, NETLINK_KOBJECT_UEVENT)) < 0) {
+                return -1;
+            }
+            //设置缓冲区大小为 64KB
+            if ((setsockopt(mSock, SOL_SOCKET, SO_RCVBUFFORCE, &sz, sizeof(sz)) < 0) && (setsockopt(mSock, SOL_SOCKET, SO_RCVBUF, &sz, sizeof(sz)) < 0)) {
+                goto out;
+            }
+            //设置允许 SCM_CREDENTIALS 控制消息的接收
+            if (setsockopt(mSock, SOL_SOCKET, SO_PASSCRED, &on, sizeof(on)) < 0) {
+                goto out;
+            }
+            //绑定 socket 地址
+            if (bind(mSock, (struct sockaddr *) &nladdr, sizeof(nladdr)) < 0) {
+                goto out;
+            }
+            // 创建 NetlinkHandler 对象来监听 socket
+            mHandler = new NetlinkHandler(mSock);   // NetlinkHandler的继承关系: NetlinkHandler -> NetlinkListener -> SocketListener
+            if (mHandler->start()) {                // 调用 NetlinkHandler 对象的 start() 开始监听
+                goto out;
+            }
+
+            return 0;
+
+        out:
+            close(mSock);
+            return -1;
+        }
+        注:
+            1. 这个函数的主要功能是创建一个 PF_NETLINK 类型的 socket, 之后还创建了一个 NetlinkHandler 对象用于监听和接收 socket 的数据.
+            2. SocketListener 的子类如下:
+                class FrameworkListener : public SocketListener {
+                class NetlinkListener : public SocketListener {
+                class FwmarkServer : public SocketListener {
+                class LogReader : public SocketListener {
+                class LogAudit : public SocketListener {
+                class LogListener : public SocketListener {
+                class LogKlog : public SocketListener {
+                class StatsSocketListener : public SocketListener, public virtual android::RefBase {
+            3. NetlinkHandler 类的定义如下:
+                class NetlinkHandler: public NetlinkListener {
+            4. /system/core/libsysutils/include/sysutils/SocketListener.h
+
+18.1.3 处理 block 类型的 uevent
+    上面调用 NetlinkHandler 的 start() 函数在 /system/vold/NetlinkHandler.cpp 文件中的代码如下:
+        int NetlinkHandler::start() {
+            return this->startListener();
+        }
+
+    下面看 startListener() 函数在 /system/core/libsysutils/src/SocketListener.cpp 文件中的代码如下:
+        int SocketListener::startListener(int backlog) {
+            if (!mSocketName && mSock == -1) {
+                errno = EINVAL;
+                return -1;
+            } else if (mSocketName) {   // 只有 中会设置 mSocketName
+                if ((mSock = android_get_control_socket(mSocketName)) < 0) {
+                    return -1;
+                }
+                fcntl(mSock, F_SETFD, FD_CLOEXEC);
+            }
+
+            if (mListen && listen(mSock, backlog) < 0) {    // mListen 为true
+                return -1;
+            } else if (!mListen)
+                mClients->push_back(new SocketClient(mSock, false, mUseCmdNum));
+
+            if (pipe(mCtrlPipe)) {  //创建管道, 这个管道的作用是通知线程停止监听(退出监听程序), 这个线程就是接下来 pthread_create 创建的线程
+                return -1;
+            }
+            // 创建一个监听线程
+            if (pthread_create(&mThread, NULL, SocketListener::threadStart, this)) {
+                return -1;
+            }
+
+            return 0;
+        }
+
+    接下来看 threadStart() 函数在 /system/core/libsysutils/src/SocketListener.cpp 文件中的代码如下:
+        void *SocketListener::threadStart(void *obj) {
+            SocketListener *me = reinterpret_cast<SocketListener *>(obj);
+
+            me->runListener();
+            pthread_exit(NULL);
+            return NULL;
+        }
+
+    接下来看 runListener() 函数在 /system/core/libsysutils/src/SocketListener.cpp 文件中的代码如下:
+        void SocketListener::runListener() {
+
+            SocketClientCollection pendingList;
+
+            while(1) {  // 进入无线循环
+                SocketClientCollection::iterator it;
+                fd_set read_fds;
+                int rc = 0;
+                int max = -1;
+
+                FD_ZERO(&read_fds);
+
+                if (mListen) {  // 如果需要监听
+                    max = mSock;
+                    FD_SET(mSock, &read_fds);   // 把 mSock 加入到read_fds
+                }
+
+                FD_SET(mCtrlPipe[0], &read_fds);    // 把管道 mCtrlPipe[0] 也加入到read_fds
+                if (mCtrlPipe[0] > max)
+                    max = mCtrlPipe[0];
+
+                pthread_mutex_lock(&mClientsLock);
+                // mClients 中保存的是 NetlinkHandler 对象的 socket, 把它也加入到 read_fds
+                for (it = mClients->begin(); it != mClients->end(); ++it) {
+                    int fd = (*it)->getSocket();
+                    FD_SET(fd, &read_fds);
+                    if (fd > max) {
+                        max = fd;
+                    }
+                }
+                pthread_mutex_unlock(&mClientsLock);
+                // 执行 select, 开始等待 socket 上数据的到来
+                if ((rc = select(max + 1, &read_fds, NULL, NULL, NULL)) < 0) {
+                    if (errno == EINTR)
+                        continue;   // 因为中断退出 select, 继续执行
+                    sleep(1);
+                    continue;   // select 出错了, 睡眠1秒后继续
+                } else if (!rc) // 如果 fd 上没有数据到达, 继续
+                    continue;
+
+                if (FD_ISSET(mCtrlPipe[0], &read_fds)) {    // 如果是管道上有数据到达, 退出循环,结束监听
+                    char c = CtrlPipe_Shutdown;
+                    TEMP_FAILURE_RETRY(read(mCtrlPipe[0], &c, 1));
+                    if (c == CtrlPipe_Shutdown) {
+                        break;
+                    }
+                    continue;
+                }
+                if (mListen && FD_ISSET(mSock, &read_fds)) {    // 如果是 SocketListener 对象上有连接请求, 如NetlinkHandler
+                    int c = TEMP_FAILURE_RETRY(accept4(mSock, nullptr, nullptr, SOCK_CLOEXEC)); // 接入连接请求
+                    if (c < 0) {
+                        sleep(1);
+                        continue;   // 接入发生错误, 继续循环
+                    }
+                    pthread_mutex_lock(&mClientsLock);
+                    mClients->push_back(new SocketClient(c, true, mUseCmdNum)); //把接入的 socket 连接加入 mClients, 这样再循环时就会监听它的数据到达
+                    pthread_mutex_unlock(&mClientsLock);
+                }
+
+                /* Add all active clients to the pending list first */
+                pendingList.clear();
+                pthread_mutex_lock(&mClientsLock);
+                for (it = mClients->begin(); it != mClients->end(); ++it) {
+                    SocketClient* c = *it;
+                    int fd = c->getSocket();
+                    if (FD_ISSET(fd, &read_fds)) {
+                        pendingList.push_back(c);   // 如果mClients中的某个socket上有数据了, 把它加入到pendingList列表中
+                        c->incRef();
+                    }
+                }
+                pthread_mutex_unlock(&mClientsLock);
+
+                /* 处理 pendingList 列表, Process the pending list, since it is owned by the thread, there is no need to lock it */
+                while (!pendingList.empty()) {
+                    /* Pop the first item from the list */
+                    it = pendingList.begin();
+                    SocketClient* c = *it;
+                    pendingList.erase(it);  // 把处理了的 socket 从 pendingList 列表中移除
+                    /* Process it, if false is returned, remove from list */
+                    if (!onDataAvailable(c)) {  // 调用 onDataAvailable() 函数处理数据
+                        release(c, false);
+                    }
+                    c->decRef();
+                }
+            }
+        }
+    接下来看 onDataAvailable() 函数在 /system/core/libsysutils/src/NetlinkListener.cpp 文件中的代码如下:
+        bool NetlinkListener::onDataAvailable(SocketClient *cli) {
+            int socket = cli->getSocket();
+            ssize_t count;
+            uid_t uid = -1;
+
+            bool require_group = true;
+            if (mFormat == NETLINK_FORMAT_BINARY_UNICAST) {
+                require_group = false;
+            }
+
+            count = TEMP_FAILURE_RETRY(uevent_kernel_recv(socket, mBuffer, sizeof(mBuffer), require_group, &uid));
+            if (count < 0) {
+                SLOGE("recvmsg failed (%s)", strerror(errno));
+                return false;
+            }
+
+            NetlinkEvent *evt = new NetlinkEvent();
+            if (evt->decode(mBuffer, count, mFormat)) {
+                onEvent(evt);   // 调用 onEvent() 函数
+            } else if (mFormat != NETLINK_FORMAT_BINARY) {
+                // Don't complain if parseBinaryNetlinkMessage returns false. That can
+                // just mean that the buffer contained no messages we're interested in.
+                SLOGE("Error decoding NetlinkEvent");
+            }
+
+            delete evt;
+            return true;
+        }
+
+    下面看 onEvent() 函数在 /system/vold/NetlinkHandler.cpp 文件中的代码如下:
+        void NetlinkHandler::onEvent(NetlinkEvent *evt) {
+            VolumeManager *vm = VolumeManager::Instance();
+            const char *subsys = evt->getSubsystem();
+            if (!subsys) {
+                LOG(WARNING) << "No subsystem found in netlink event";
+                return;
+            }
+
+            if (std::string(subsys) == "block") {
+                vm->handleBlockEvent(evt); // 调用 VolumeManager 对象的 handleBlockEvent()函数
+            }
+        }
+
+    下面看 handleBlockEvent() 函数在 /system/vold/VolumeManager.cpp 文件中的代码如下:
+        void VolumeManager::handleBlockEvent(NetlinkEvent *evt) {
+            std::lock_guard<std::mutex> lock(mLock);
+
+            std::string eventPath(evt->findParam("DEVPATH")?evt->findParam("DEVPATH"):"");
+            std::string devType(evt->findParam("DEVTYPE")?evt->findParam("DEVTYPE"):"");
+
+            if (devType != "disk") return;
+
+            int major = std::stoi(evt->findParam("MAJOR"));
+            int minor = std::stoi(evt->findParam("MINOR"));
+            dev_t device = makedev(major, minor);
+
+            switch (evt->getAction()) {
+                case NetlinkEvent::Action::kAdd: {
+                    for (const auto& source : mDiskSources) {
+                        if (source->matches(eventPath)) {
+                            // For now, assume that MMC and virtio-blk (the latter is emulator-specific; see Disk.cpp for details) devices are SD, and that everything else is USB
+                            int flags = source->getFlags();
+                            if (major == kMajorBlockMmc
+                                || (android::vold::IsRunningInEmulator()
+                                && major >= (int) kMajorBlockExperimentalMin
+                                && major <= (int) kMajorBlockExperimentalMax)) {
+                                flags |= android::vold::Disk::Flags::kSd;
+                            } else {
+                                flags |= android::vold::Disk::Flags::kUsb;
+                            }
+
+                            auto disk = new android::vold::Disk(eventPath, device, source->getNickname(), flags);
+                            handleDiskAdded(std::shared_ptr<android::vold::Disk>(disk));
+                            break;
+                        }
+                    }
+                    break;
+                }
+                case NetlinkEvent::Action::kChange: {
+                    handleDiskChanged(device);
+                    break;
+                }
+                case NetlinkEvent::Action::kRemove: {
+                    handleDiskRemoved(device);
+                    break;
+                }
+                default: {
+                    break;
+                }
+            }
+        }
+
+
+18.1.4 处理 MountService 的命令
 
 
 
 
+18.2 对设备进行操作 - MountService 服务
+18.2.1 MountService 的启动过程
+18.2.2 进行Socket通信 - NativeDaemonConnector
+18.2.3 OBB 文件系统
 
 
+18.3 其他存储相关的服务
+    Service 中还有2个服务和存储相关.
 
+18.3.1 监视存储设备大小 - DeviceStorageMonitorService
+    DeviceStorageMonitorService 服务用来监视系统存储设备空间的大小, 如果低于阈值, 则广播警告.
 
+    DeviceStorageMonitorService 服务在 SystemServer 中创建并加入到 SystemServiceManager 的 mServices列表中的代码如下:
+        mSystemServiceManager.startService(DeviceStorageMonitorService.class);
 
+    下面看看 DeviceStorageMonitorService 类的构造函数代码:
+        DeviceStorageMonitorService构造函数 -> check() -> updateBroadcasts()
 
+    下面看看 updateBroadcasts() 函数代码:
+        private void updateBroadcasts(VolumeInfo vol, int oldLevel, int newLevel, int seq) {
+            if (!Objects.equals(StorageManager.UUID_PRIVATE_INTERNAL, vol.getFsUuid())) {
+                return;
+            }
+            // 创建四类用于通知的存储器空间不足的intent
+            final Intent lowIntent = new Intent(Intent.ACTION_DEVICE_STORAGE_LOW)
+                    .addFlags(Intent.FLAG_RECEIVER_REGISTERED_ONLY_BEFORE_BOOT
+                            | Intent.FLAG_RECEIVER_INCLUDE_BACKGROUND
+                            | Intent.FLAG_RECEIVER_VISIBLE_TO_INSTANT_APPS)
+                    .putExtra(EXTRA_SEQUENCE, seq);
+            final Intent notLowIntent = new Intent(Intent.ACTION_DEVICE_STORAGE_OK)
+                    .addFlags(Intent.FLAG_RECEIVER_REGISTERED_ONLY_BEFORE_BOOT
+                            | Intent.FLAG_RECEIVER_INCLUDE_BACKGROUND
+                            | Intent.FLAG_RECEIVER_VISIBLE_TO_INSTANT_APPS)
+                    .putExtra(EXTRA_SEQUENCE, seq);
+            if (State.isEntering(State.LEVEL_LOW, oldLevel, newLevel)) {
+                getContext().sendStickyBroadcastAsUser(lowIntent, UserHandle.ALL);
+            } else if (State.isLeaving(State.LEVEL_LOW, oldLevel, newLevel)) {
+                getContext().removeStickyBroadcastAsUser(lowIntent, UserHandle.ALL);
+                getContext().sendBroadcastAsUser(notLowIntent, UserHandle.ALL);
+            }
+            final Intent fullIntent = new Intent(Intent.ACTION_DEVICE_STORAGE_FULL)
+                    .addFlags(Intent.FLAG_RECEIVER_REGISTERED_ONLY_BEFORE_BOOT)
+                    .putExtra(EXTRA_SEQUENCE, seq);
+            final Intent notFullIntent = new Intent(Intent.ACTION_DEVICE_STORAGE_NOT_FULL)
+                    .addFlags(Intent.FLAG_RECEIVER_REGISTERED_ONLY_BEFORE_BOOT)
+                    .putExtra(EXTRA_SEQUENCE, seq);
+            if (State.isEntering(State.LEVEL_FULL, oldLevel, newLevel)) {
+                getContext().sendStickyBroadcastAsUser(fullIntent, UserHandle.ALL);
+            } else if (State.isLeaving(State.LEVEL_FULL, oldLevel, newLevel)) {
+                getContext().removeStickyBroadcastAsUser(fullIntent, UserHandle.ALL);
+                getContext().sendBroadcastAsUser(notFullIntent, UserHandle.ALL);
+            }
+        }
 
+18.3.2 打印系统分区信息 - DiskStatsService
+    DiskStatsService 服务用来打印输出系统分区信息, 这个服务也是在 SystemServer 创建并加入到 ServiceManager中.
+        ServiceManager.addService("diskstats", new DiskStatsService(context));
 
-
-
-
-
-
-
-
-
-
-
-
-
+    在 DiskStatsService 中有一个 protected 类型的 dump() 方法, 用来打印 data 目录, cache 目录, system 目录, 函数代码如下:
+        @Override
+        protected void dump(FileDescriptor fd, PrintWriter pw, String[] args) {
+            //......
+            if (protoFormat) {
+                reportDiskWriteSpeedProto(proto);
+            } else {
+                reportDiskWriteSpeed(pw);
+            }
+            reportFreeSpace(Environment.getDataDirectory(), "Data", pw, proto, DiskStatsFreeSpaceProto.FOLDER_DATA);
+            reportFreeSpace(Environment.getDownloadCacheDirectory(), "Cache", pw, proto, DiskStatsFreeSpaceProto.FOLDER_CACHE);
+            reportFreeSpace(new File("/system"), "System", pw, proto, DiskStatsFreeSpaceProto.FOLDER_SYSTEM);
+            //......
+        }

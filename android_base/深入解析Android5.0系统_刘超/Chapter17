@@ -1,30 +1,1396 @@
-第17章 Android的电源管理
+第17章 Android 的电源管理
 
 
-.
+移动设备的电量主要由两种元件消耗:CPU和显示屏, 因此设法降低这两种元件的耗电量就是电源管理的关键.
+为移动设备设计的CPU大都有两种工作频率, 为了省电, 大部分时间CPU都工作在较低的频率下, 只有进行密集计算时, 如视频解码时, 才会切换到高频状态.
+显示屏省电的方法是尽量减少亮屏时间, 但是, 显示屏的开关和应用有很大关系, 因此, 系统需要有一套机制来控制显示屏的开关和亮度, 这也是电源管理的主要工作之一.
+
+PowerManagerService中使用到了BatteryService, BatteryService中使用的 batterypropreg 服务位于 healthd 守护进程中,
+Health daemon(后台驻留程序)
+此处需要确认healthd 守护进程是不是在 init进程中启动, 还有 healthd 守护进程的作用.
+
+
+17.1 电源管理服务 - PowerManagerService
+    PowerManagerService 提供 Android 系统的电源管理服务, 主要功能是控制系统的待机时间, 控制显示屏的开关和亮度调节, 以及查询和控制光线传感器和距离传感器.
+
+
+17.1.1 初始化过程
+    SystemServer 中创建 PMS 并加入到 ServiceManager 的代码如下:
+        mPowerManagerService = mSystemServiceManager.startService(PowerManagerService.class);
+        mPowerManagerService.systemReady(mActivityManagerService.getAppOpsService());
+        注意:
+            这里 startService() 创建PMS对象并注册到 SystemServiceManager 中的 mServices 列表.
+            在系统准备就绪后调用 systemReady()对 PMS 再进行一些初始化工作
+
+    下面看 PMS 的构造函数代码:
+        public PowerManagerService(Context context) {
+            super(context);
+            mContext = context;
+            mHandlerThread = new ServiceThread(TAG, Process.THREAD_PRIORITY_DISPLAY, false /*allowIo*/);
+            mHandlerThread.start();
+            mHandler = new PowerManagerHandler(mHandlerThread.getLooper()); //创建处理和发送消息的PowerManagerHandler
+            mConstants = new Constants(mHandler);
+            mAmbientDisplayConfiguration = new AmbientDisplayConfiguration(mContext);
+
+            mBatterySavingStats = new BatterySavingStats(mLock);
+            mBatterySaverPolicy = new BatterySaverPolicy(mLock, mContext, mBatterySavingStats);
+            mBatterySaverController = new BatterySaverController(mLock, mContext, BackgroundThread.get().getLooper(), mBatterySaverPolicy, mBatterySavingStats);
+            mBatterySaverStateMachine = new BatterySaverStateMachine(mLock, mContext, mBatterySaverController);
+
+            synchronized (mLock) {
+                mWakeLockSuspendBlocker = createSuspendBlockerLocked("PowerManagerService.WakeLocks");  // 创建 mWakeLockSuspendBlocker, 后面会继续分析
+                mDisplaySuspendBlocker = createSuspendBlockerLocked("PowerManagerService.Display");     // 创建 mDisplaySuspendBlocker, 后面会继续分析
+                mDisplaySuspendBlocker.acquire();
+                mHoldingDisplaySuspendBlocker = true;
+                mHalAutoSuspendModeEnabled = false;
+                mHalInteractiveModeEnabled = true;
+
+                // 设置PMS的状态, WAKEFULNESS_AWAKE 表示系统目前处于正常运行状态
+                mWakefulness = WAKEFULNESS_AWAKE;
+
+                sQuiescent = SystemProperties.get(SYSTEM_PROPERTY_QUIESCENT, "0").equals("1");
+
+                nativeInit();   //  后面会继续介绍
+                nativeSetAutoSuspend(false);
+                nativeSetInteractive(true);
+                nativeSetFeature(POWER_FEATURE_DOUBLE_TAP_TO_WAKE, 0);
+            }
+        }
+        注:
+            PowerManagerInternal.WAKEFULNESS_ASLEEP;    //表示系统目前处于休眠状态, 只能被 wakeUp() 调用唤醒
+            PowerManagerInternal.WAKEFULNESS_AWAKE;     //表示系统目前处于正常运行状态, 可以调用 goToSleep()切换到休眠状态
+            PowerManagerInternal.WAKEFULNESS_DOZING;    //表示系统正处于播放屏保的状态, 可以调用 wakeUp() 唤醒
+            PowerManagerInternal.WAKEFULNESS_DREAMING;  //表示系统正处于"doze"状态, 这种状态下只有低耗电的"屏保"可以运行,其他应用进程都被挂起,可以调用wakeUp()唤醒
+
+    接下来看 nativeInit() 函数在 com_android_server_power_PowerManagerService.cpp 文件中的代码:
+        static void nativeInit(JNIEnv* env, jobject obj) {
+            gPowerManagerServiceObj = env->NewGlobalRef(obj);
+            gPowerHalMutex.lock();
+            connectPowerHalLocked();    //装载"Power"模块, 然后调用模块的初始化函数init()
+            gPowerHalMutex.unlock();
+        }
+
+
+17.1.2 系统准备工作 - PMS 的 systemReady()方法
+    PMS中 systemReady()函数代码如下:
+        public void systemReady(IAppOpsService appOps) {
+            synchronized (mLock) {
+                mSystemReady = true;
+                mAppOps = appOps;
+                mDreamManager = getLocalService(DreamManagerInternal.class);                //获取DreamManagerInternal指针
+                mDisplayManagerInternal = getLocalService(DisplayManagerInternal.class);    //获取DisplayManagerInternal指针
+                mPolicy = getLocalService(WindowManagerPolicy.class);                       //获取WindowManagerPolicy指针
+                mBatteryManagerInternal = getLocalService(BatteryManagerInternal.class);    //获取BatteryManagerInternal指针
+
+                PowerManager pm = (PowerManager) mContext.getSystemService(Context.POWER_SERVICE);  //获取PowerManager
+                mScreenBrightnessSettingMinimum = pm.getMinimumScreenBrightnessSetting();   //获取最小屏幕亮度
+                mScreenBrightnessSettingMaximum = pm.getMaximumScreenBrightnessSetting();   //获取最大屏幕亮度
+                mScreenBrightnessSettingDefault = pm.getDefaultScreenBrightnessSetting();   //获取缺省默认屏幕亮度
+
+                // 创建SystemSensorManager对象用于和SensorService交互,
+                SensorManager sensorManager = new SystemSensorManager(mContext, mHandler.getLooper());
+
+                mBatteryStats = BatteryStatsService.getService();   //得到BatteryStatsService的引用对象
+
+                // 创建Notifier对象, Notifier用于广播系统中和power相关的变化, 如屏幕的关闭和打开等.
+                mNotifier = new Notifier(Looper.getMainLooper(), mContext, mBatteryStats, createSuspendBlockerLocked("PowerManagerService.Broadcasts"), mPolicy);
+
+                // 创建WirelessChargerDetector对象, 用于无线充电检测的传感器.
+                mWirelessChargerDetector = new WirelessChargerDetector(sensorManager, createSuspendBlockerLocked("PowerManagerService.WirelessChargerDetector"), mHandler);
+                mSettingsObserver = new SettingsObserver(mHandler);    //创建监听系统设置变化的对象
+
+                mLightsManager = getLocalService(LightsManager.class); //得到 LightsManager 的引用对象
+                mAttentionLight = mLightsManager.getLight(LightsManager.LIGHT_ID_ATTENTION);
+
+                // 初始化power管理模块, 此处传入的 mDisplayPowerCallbacks 在后面会分析到, Initialize display power management.
+                mDisplayManagerInternal.initPowerManagement(mDisplayPowerCallbacks, mHandler, sensorManager);
+
+                // 注册Observer监听用户切换
+                final ForegroundProfileObserver observer = new ForegroundProfileObserver();
+                ActivityManager.getService().registerUserSwitchObserver(observer, TAG);
+
+                readConfigurationLocked();
+                updateSettingsLocked();
+                mDirty |= DIRTY_BATTERY_STATE;
+                updatePowerStateLocked(); 是 PMS 的核心方法, 后面会介绍.
+            }
+
+            final ContentResolver resolver = mContext.getContentResolver();
+            mConstants.start(resolver);
+
+            mBatterySaverController.systemReady();
+            mBatterySaverPolicy.systemReady();
+
+            // 监听系统设置的变化, 在Android Q的设置中, 很多设置项都和 PMS 有关, 包括屏幕的亮度,自动关闭屏幕的时间,能否启动屏保等.
+            resolver.registerContentObserver(Settings.Secure.getUriFor(Settings.Secure.SCREENSAVER_ENABLED), false, mSettingsObserver, UserHandle.USER_ALL);
+            resolver.registerContentObserver(Settings.Secure.getUriFor(Settings.Secure.SCREENSAVER_ACTIVATE_ON_SLEEP), false, mSettingsObserver, UserHandle.USER_ALL);
+            resolver.registerContentObserver(Settings.Secure.getUriFor(Settings.Secure.SCREENSAVER_ACTIVATE_ON_DOCK), false, mSettingsObserver, UserHandle.USER_ALL);
+            resolver.registerContentObserver(Settings.System.getUriFor(Settings.System.SCREEN_OFF_TIMEOUT), false, mSettingsObserver, UserHandle.USER_ALL);
+            resolver.registerContentObserver(Settings.Secure.getUriFor(Settings.Secure.SLEEP_TIMEOUT), false, mSettingsObserver, UserHandle.USER_ALL);
+            resolver.registerContentObserver(Settings.Global.getUriFor(Settings.Global.STAY_ON_WHILE_PLUGGED_IN), false, mSettingsObserver, UserHandle.USER_ALL);
+            resolver.registerContentObserver(Settings.System.getUriFor(Settings.System.SCREEN_BRIGHTNESS_MODE), false, mSettingsObserver, UserHandle.USER_ALL);
+            resolver.registerContentObserver(Settings.System.getUriFor(Settings.System.SCREEN_AUTO_BRIGHTNESS_ADJ), false, mSettingsObserver, UserHandle.USER_ALL);
+            resolver.registerContentObserver(Settings.Global.getUriFor(Settings.Global.THEATER_MODE_ON), false, mSettingsObserver, UserHandle.USER_ALL);
+            resolver.registerContentObserver(Settings.Secure.getUriFor(Settings.Secure.DOZE_ALWAYS_ON), false, mSettingsObserver, UserHandle.USER_ALL);
+            resolver.registerContentObserver(Settings.Secure.getUriFor(Settings.Secure.DOUBLE_TAP_TO_WAKE), false, mSettingsObserver, UserHandle.USER_ALL);
+            resolver.registerContentObserver(Settings.Global.getUriFor(Settings.Global.DEVICE_DEMO_MODE), false, mSettingsObserver, UserHandle.USER_SYSTEM);
+            //向 IVrManager 注册回调
+            IVrManager vrManager = (IVrManager) getBinderService(Context.VR_SERVICE);
+            if (vrManager != null) {
+                try {
+                    vrManager.registerListener(mVrStateCallbacks);
+                } catch (RemoteException e) {
+                    Slog.e(TAG, "Failed to register VR mode state listener: " + e);
+                }
+            }
+
+            // 注册广播接收器, PMS 需要关注系统的变化, 包括系统启动完成, 屏保启动和关闭, 用户切换, Dock插拔等.
+            IntentFilter filter = new IntentFilter();
+            filter.addAction(Intent.ACTION_BATTERY_CHANGED);    //电量变化
+            filter.setPriority(IntentFilter.SYSTEM_HIGH_PRIORITY);
+            mContext.registerReceiver(new BatteryReceiver(), filter, null, mHandler);
+
+            filter = new IntentFilter();
+            filter.addAction(Intent.ACTION_DREAMING_STARTED);   //屏保启动
+            filter.addAction(Intent.ACTION_DREAMING_STOPPED);   //屏保关闭
+            mContext.registerReceiver(new DreamReceiver(), filter, null, mHandler);
+
+            filter = new IntentFilter();
+            filter.addAction(Intent.ACTION_USER_SWITCHED);      //用户切换
+            mContext.registerReceiver(new UserSwitchedReceiver(), filter, null, mHandler);
+
+            filter = new IntentFilter();
+            filter.addAction(Intent.ACTION_DOCK_EVENT);         //Dock插拔事件
+            mContext.registerReceiver(new DockReceiver(), filter, null, mHandler);
+        }
+        注:
+            SensorService 是一个 native 的 service, 也存在于 SystemServer 进程中, 管理着 Android 上的各种传感设备.
+            SystemServer 创建了一些内部使用服务, 没有通过ServiceManager发布, 而是通过内部的LocalServices类来管理.
+            这些内部服务的共同特点是从 SystemService 类派生, 通过 getLocalService() 方法可以获得参数关联的内部服务指针.
+
+
+17.1.3 报告用户活动 - PowerManager 的 userActivity()方法
+    PowerManager 是 PowerManagerService 的代理类, 它提供了一些接口让用户进程可以和 PowerManagerService 交互.
+    接口 userActivity() 用于用户进程向 PMS 报告用户影响系统休眠的活动, 例如,用户点击屏幕时系统会调用该方法来告诉 PMS 用户点击的时间, 这样 PMS 就将更新内部保存的时间值,从而推迟系统休眠时间.
+    调用流程: PM.userAcMtivity() -> PMS.userActivityInternal()
+                                -> PMS.userActivityNoUpdateLocked() 只是把参数保存到内部变量中, 不会采取任何动作, 接下来继续分析.
+                                -> PMS.updatePowerStateLocked() 是 PMS 的核心方法, 后面会介绍.
+    下面看 userActivityNoUpdateLocked() 函数代码:
+        private boolean userActivityNoUpdateLocked(long eventTime, int event, int flags, int uid) {
+            if (eventTime < mLastSleepTime || eventTime < mLastWakeTime || !mBootCompleted || !mSystemReady) {
+                return false;
+            }
+            try {
+                if (eventTime > mLastInteractivePowerHintTime) {
+                    powerHintInternal(PowerHint.INTERACTION, 0);
+                    mLastInteractivePowerHintTime = eventTime;
+                }
+
+                //发出通知, Notifier 用于广播系统中和 power 相关的变化.
+                mNotifier.onUserActivity(event, uid);
+
+                if (mUserInactiveOverrideFromWindowManager) {
+                    mUserInactiveOverrideFromWindowManager = false;
+                    mOverriddenTimeout = -1;
+                }
+
+                // 如果系统处于休眠或者doze模式,直接返回.
+                if (mWakefulness == WAKEFULNESS_ASLEEP || mWakefulness == WAKEFULNESS_DOZING || (flags & PowerManager.USER_ACTIVITY_FLAG_INDIRECT) != 0) {
+                    return false;
+                }
+
+                // 此处可能更新 profile.mLastUserActivityTime 的值
+                maybeUpdateForegroundProfileLastActivityLocked(eventTime);
+
+                if ((flags & PowerManager.USER_ACTIVITY_FLAG_NO_CHANGE_LIGHTS) != 0) {
+                    if (eventTime > mLastUserActivityTimeNoChangeLights && eventTime > mLastUserActivityTime) {
+                        mLastUserActivityTimeNoChangeLights = eventTime; // mLastUserActivityTimeNoChangeLights 用来记录调用userActivity()方法的时间
+                        mDirty |= DIRTY_USER_ACTIVITY;      // mDirty用来记录用户的操作类型
+                        if (event == PowerManager.USER_ACTIVITY_EVENT_BUTTON) {
+                            mDirty |= DIRTY_QUIESCENT;
+                        }
+
+                        return true;
+                    }
+                } else {
+                    if (eventTime > mLastUserActivityTime) {
+                        mLastUserActivityTime = eventTime;  // mLastUserActivityTime 用来记录调用userActivity()方法的时间
+                        mDirty |= DIRTY_USER_ACTIVITY;
+                        if (event == PowerManager.USER_ACTIVITY_EVENT_BUTTON) {
+                            mDirty |= DIRTY_QUIESCENT;
+                        }
+                        return true;
+                    }
+                }
+            }
+            return false;
+        }
+        注:
+            mLastUserActivityTimeNoChangeLights, mLastUserActivityTime 和 mDirty 的值在updatePowerStateLocked()函数中将会作为是否要执行睡眠或唤醒操作的依据.
+
+
+
+17.1.4 强制系统进入休眠模式 - goToSleep()接口
+    PM 中 goToSleep() 用来强制系统进入休眠模式, 通常当系统无人操作时, 系统将调用goToSleep()来进入休眠模式.
+    调用流程: PM.goToSleep() -> PMS.goToSleep()
+                            -> goToSleepInternal()
+                            -> goToSleepNoUpdateLocked()
+                            -> updatePowerStateLocked() 是 PMS 的核心方法, 后面会介绍.
+
+    下面看 goToSleepNoUpdateLocked() 函数代码:
+        private boolean goToSleepNoUpdateLocked(long eventTime, int reason, int flags, int uid) {
+            if (eventTime < mLastWakeTime || mWakefulness == WAKEFULNESS_ASLEEP || mWakefulness == WAKEFULNESS_DOZING || !mBootCompleted || !mSystemReady) {
+                return false;
+            }
+            // 打印log
+            try {
+                switch (reason) {
+                    case PowerManager.GO_TO_SLEEP_REASON_DEVICE_ADMIN:
+                        Slog.i(TAG, "Going to sleep due to device administration policy " + "(uid " + uid +")...");
+                        break;
+                    case PowerManager.GO_TO_SLEEP_REASON_TIMEOUT:
+                        Slog.i(TAG, "Going to sleep due to screen timeout (uid " + uid +")...");
+                        break;
+                    case PowerManager.GO_TO_SLEEP_REASON_LID_SWITCH:
+                        Slog.i(TAG, "Going to sleep due to lid switch (uid " + uid +")...");
+                        break;
+                    case PowerManager.GO_TO_SLEEP_REASON_POWER_BUTTON:
+                        Slog.i(TAG, "Going to sleep due to power button (uid " + uid +")...");
+                        break;
+                    case PowerManager.GO_TO_SLEEP_REASON_SLEEP_BUTTON:
+                        Slog.i(TAG, "Going to sleep due to sleep button (uid " + uid +")...");
+                        break;
+                    case PowerManager.GO_TO_SLEEP_REASON_HDMI:
+                        Slog.i(TAG, "Going to sleep due to HDMI standby (uid " + uid +")...");
+                        break;
+                    case PowerManager.GO_TO_SLEEP_REASON_ACCESSIBILITY:
+                        Slog.i(TAG, "Going to sleep by an accessibility service request (uid " + uid +")...");
+                        break;
+                    default:
+                        Slog.i(TAG, "Going to sleep by application request (uid " + uid +")...");
+                        reason = PowerManager.GO_TO_SLEEP_REASON_APPLICATION;
+                        break;
+                }
+                // 修改成员变量 mLastSleepTime 的值.
+                mLastSleepTime = eventTime;
+                mSandmanSummoned = true;
+                // 发送将要休眠的通知, 并修改成员变量 mWakefulness 和 mDirty 的值.
+                setWakefulnessLocked(WAKEFULNESS_DOZING, reason);
+
+                // Report the number of wake locks that will be cleared by going to sleep.
+                int numWakeLocksCleared = 0;
+                final int numWakeLocks = mWakeLocks.size();
+                for (int i = 0; i < numWakeLocks; i++) {
+                    final WakeLock wakeLock = mWakeLocks.get(i);
+                    switch (wakeLock.mFlags & PowerManager.WAKE_LOCK_LEVEL_MASK) {
+                        case PowerManager.FULL_WAKE_LOCK:
+                        case PowerManager.SCREEN_BRIGHT_WAKE_LOCK:
+                        case PowerManager.SCREEN_DIM_WAKE_LOCK:
+                            numWakeLocksCleared += 1;
+                            break;
+                    }
+                }
+                // 打印EventLog
+                EventLogTags.writePowerSleepRequested(numWakeLocksCleared);
+
+                // Skip dozing if requested.
+                if ((flags & PowerManager.GO_TO_SLEEP_FLAG_NO_DOZE) != 0) {
+                    reallyGoToSleepNoUpdateLocked(eventTime, uid);
+                }
+            }
+            return true;
+        }
+
+
+
+17.2 控制系统休眠的机制
+    Android 设备的休眠和唤醒主要基于 WakeLock 机制.
+    PowerManager 用来控制设备的电源状态, PowerManager.WakeLock 也称作唤醒锁, 是一种保持 CPU 运转防止设备休眠的方式.
+    WakeLock 是一种上锁机制, 只要有进程获得了 WakeLock 锁, 系统就不会进入休眠, 例如,下载文件或播放歌曲时, 即使休眠时间到了, 系统也不能进行休眠.
+    应用使用时调用 newWakeLock() 接口创建一个 WakeLock 类的对象, 然后通过它的 acquire()方法禁止系统休眠, 应用完成工作后调用 release() 方法来恢复休眠机制, 否则系统将无法休眠,直到耗光所有电量.
+    使用时最好使用 acquire(long timeout) 接口给 WakeLock 设置超时时间, 超时后会自动解锁.
+
+    应用程序示例代码:
+        <uses-permission android:name="android.permission.WAKE_LOCK" />     //唤醒锁的权限
+        <uses-permission android:name="android.permission.DEVICE_POWER"/>   // 可能还需要权限
+        PowerManager powerManager = (PowerManager) getSystemService(POWER_SERVICE); // 获取 PowerManager 的指针
+        WakeLock wakeLock = powerManager.newWakeLock(PowerManager.PARTIAL_WAKE_LOCK, "MyWakelockTag");  // 创建唤醒锁
+        wakeLock.acquire();  // 获得唤醒锁, 最好调用acquire(timeout)设置超时
+        // .... 进行一些后台服务
+        wakelock.release(); // 释放唤醒锁, 如果没有其它唤醒锁存在, 设备会很快进入休眠状态
+
+    WakeLock 的两种模式: 不计数锁模式 和 计数锁模式
+        通过 setReferenceCounted(boolean value) 来指定, true表示计数, false表示不计数, 默认为计数机制.
+        如果是不计数模式, 不论之前调用了多少次 acquire() , 调用一次 release() 就会释放所有锁.
+        如果是计数模式, 每次调用 acquire() 都会使计数 count++, release() 的时候 count 的值必须相同.
+
+
+
+17.2.1 PMS 中 WakeLock 相关接口
+    获取锁 acquireWakeLockInternal()函数代码如下:
+        private void acquireWakeLockInternal(IBinder lock, int flags, String tag, String packageName, WorkSource ws, String historyTag, int uid, int pid) {
+            synchronized (mLock) {
+                WakeLock wakeLock;
+                int index = findWakeLockIndexLocked(lock);  // 检查这个lock是否已经存在
+                boolean notifyAcquire;
+                if (index >= 0) {  // lock已经存在
+                    wakeLock = mWakeLocks.get(index);   //获取 lock 对象
+                    if (!wakeLock.hasSameProperties(flags, tag, ws, uid, pid)) {
+                        // 更新其属性值
+                        notifyWakeLockChangingLocked(wakeLock, flags, tag, packageName, uid, pid, ws, historyTag);
+                        wakeLock.updateProperties(flags, tag, packageName, ws, historyTag, uid, pid);
+                    }
+                    notifyAcquire = false;
+                } else {           // lock不存在
+                    UidState state = mUidState.get(uid);
+                    if (state == null) {
+                        state = new UidState(uid);
+                        state.mProcState = ActivityManager.PROCESS_STATE_NONEXISTENT;
+                        mUidState.put(uid, state);
+                    }
+                    state.mNumWakeLocks++;  // UidState 中维护的锁数量加1
+                    // 创建新的WakeLock对象
+                    wakeLock = new WakeLock(lock, flags, tag, packageName, ws, historyTag, uid, pid, state);
+                    try {
+                        lock.linkToDeath(wakeLock, 0);
+                    } catch (RemoteException ex) {
+                        throw new IllegalArgumentException("Wake lock is already dead.");
+                    }
+                    // 添加到 mWakeLocks列表, mWakeLocks列表中包含了系统中所有的 WakeLock 对象.
+                    mWakeLocks.add(wakeLock);
+                    setWakeLockDisabledStateLocked(wakeLock);
+                    notifyAcquire = true;
+                }
+                // 此处会调用到 wakeUpNoUpdateLocked() 方法, 接下来分析
+                applyWakeLockFlagsOnAcquireLocked(wakeLock, uid);
+                mDirty |= DIRTY_WAKE_LOCKS;
+                updatePowerStateLocked();
+                if (notifyAcquire) {
+                    // This needs to be done last so we are sure we have acquired the
+                    // kernel wake lock.  Otherwise we have a race where the system may
+                    // go to sleep between the time we start the accounting in battery
+                    // stats and when we actually get around to telling the kernel to
+                    // stay awake.
+                    notifyWakeLockAcquiredLocked(wakeLock);
+                }
+            }
+        }
+    接下来看 wakeUpNoUpdateLocked()函数代码如下:
+        private boolean wakeUpNoUpdateLocked(long eventTime, String reason, int reasonUid, String opPackageName, int opUid) {
+            if (eventTime < mLastSleepTime || mWakefulness == WAKEFULNESS_AWAKE || !mBootCompleted || !mSystemReady) {
+                return false;
+            }
+            try {
+                switch (mWakefulness) {
+                    case WAKEFULNESS_ASLEEP:
+                        Slog.i(TAG, "Waking up from sleep (uid=" + reasonUid + " reason=" + reason + ")...");
+                        break;
+                    case WAKEFULNESS_DREAMING:
+                        Slog.i(TAG, "Waking up from dream (uid=" + reasonUid + " reason=" + reason + ")...");
+                        break;
+                    case WAKEFULNESS_DOZING:
+                        Slog.i(TAG, "Waking up from dozing (uid=" + reasonUid + " reason=" + reason + ")...");
+                        break;
+                }
+                //修改 mLastWakeTime, mWakefulness 和 mDirty 的值
+                mLastWakeTime = eventTime;
+                setWakefulnessLocked(WAKEFULNESS_AWAKE, 0);
+
+                // 发送将要唤醒的通知.
+                mNotifier.onWakeUp(reason, reasonUid, opPackageName, opUid);
+                // 此方法前面介绍 userActivity()方法时已经介绍过, 这里调用的目的是更新 profile.mLastUserActivityTime 的值.
+                userActivityNoUpdateLocked(eventTime, PowerManager.USER_ACTIVITY_EVENT_OTHER, 0, reasonUid);
+            }
+            return true;
+        }
+
+    释放锁 releaseWakeLockInternal()函数代码如下:
+        private void releaseWakeLockInternal(IBinder lock, int flags) {
+            synchronized (mLock) {
+                int index = findWakeLockIndexLocked(lock);  // 列表中没有找到, 直接退出
+                if (index < 0) {
+                    return;
+                }
+                WakeLock wakeLock = mWakeLocks.get(index);  // 从列表中获取 lock 对象
+                if ((flags & PowerManager.RELEASE_FLAG_WAIT_FOR_NO_PROXIMITY) != 0) {
+                    mRequestWaitForNegativeProximity = true;
+                }
+                // 释放锁
+                wakeLock.mLock.unlinkToDeath(wakeLock, 0);
+                // 接下来分析
+                removeWakeLockLocked(wakeLock, index);
+            }
+        }
+    接下来看 removeWakeLockLocked() 函数代码如下:
+        private void removeWakeLockLocked(WakeLock wakeLock, int index) {
+            // 从列表中移除并发出通知
+            mWakeLocks.remove(index);
+            UidState state = wakeLock.mUidState;
+            state.mNumWakeLocks--;  // UidState 中维护的锁数量减1
+            if (state.mNumWakeLocks <= 0 && state.mProcState == ActivityManager.PROCESS_STATE_NONEXISTENT) {
+                mUidState.remove(state.mUid);
+            }
+            //发出锁被释放通知
+            notifyWakeLockReleasedLocked(wakeLock);
+            // 调用前面介绍 userActivity()方法时已经介绍过的userActivityNoUpdateLocked(), 这里调用的目的是更新profile.mLastUserActivityTime, 这样当系统休眠时间到系统就会休眠.
+            applyWakeLockFlagsOnReleaseLocked(wakeLock);
+            // 设置 mDirty 的值
+            mDirty |= DIRTY_WAKE_LOCKS;
+            updatePowerStateLocked(); 是 PMS 的核心方法, 后面会介绍.
+        }
+
+
+17.2.2 WakeLock 的 native 层实现
+    回到PMS的构造函数, 看 mWakeLockSuspendBlocker 和 mDisplaySuspendBlocker 的创建代码:
+        mWakeLockSuspendBlocker = createSuspendBlockerLocked("PowerManagerService.WakeLocks"); // 实际类型是 SuspendBlockerImpl
+        mDisplaySuspendBlocker  = createSuspendBlockerLocked("PowerManagerService.Display");   // 实际类型是 SuspendBlockerImpl
+    接下来看PMS 中的 createSuspendBlockerLocked() 函数代码如下:
+        private SuspendBlocker createSuspendBlockerLocked(String name) {
+            SuspendBlocker suspendBlocker = new SuspendBlockerImpl(name);   // 实际类型是 SuspendBlockerImpl
+            mSuspendBlockers.add(suspendBlocker);
+            return suspendBlocker;
+        }
+    接下来看 SuspendBlockerImpl 中的 acquire() 和 release()方法:
+        @Override
+        public void acquire() {
+            synchronized (this) {
+                mReferenceCount += 1;                   // 修改 SuspendBlockerImpl 中维护的计数器, 加1
+                if (mReferenceCount == 1) {
+                    nativeAcquireSuspendBlocker(mName); // 当计数器的值为1时, 调用底层的 nativeAcquireSuspendBlocker() 方法
+                }
+            }
+        }
+        @Override
+        public void release() {
+            synchronized (this) {
+                mReferenceCount -= 1;                   // 修改SuspendBlockerImpl中维护的计数器, 减1
+                if (mReferenceCount == 0) {
+                    nativeReleaseSuspendBlocker(mName); // 当计数器的值为0时, 调用底层的 nativeReleaseSuspendBlocker() 方法
+                } else if (mReferenceCount < 0) {
+                    mReferenceCount = 0;
+                }
+            }
+        }
+    接下来看 nativeAcquireSuspendBlocker() 和 nativeReleaseSuspendBlocker() 在 com_android_server_power_PowerManagerService.cpp 中代码如下:
+        static void nativeAcquireSuspendBlocker(JNIEnv *env, jclass, jstring nameStr) {
+            ScopedUtfChars name(env, nameStr);
+            acquire_wake_lock(PARTIAL_WAKE_LOCK, name.c_str());
+        }
+        static void nativeReleaseSuspendBlocker(JNIEnv *env, jclass, jstring nameStr) {
+            ScopedUtfChars name(env, nameStr);
+            release_wake_lock(name.c_str());
+        }
+    接下来看 acquire_wake_lock() 和 release_wake_lock() 在 /hardware/libhardware_legacy/power.c 中代码如下:
+        int acquire_wake_lock(int lock, const char* id) {
+            initialize_fds();   // 调用 initialize_fds(), 接下来分析
+            if (g_error) return g_error;
+            int fd;
+            ssize_t ret;
+            if (lock != PARTIAL_WAKE_LOCK) {
+                return -EINVAL;
+            }
+            fd = g_fds[ACQUIRE_PARTIAL_WAKE_LOCK];  // ACQUIRE_PARTIAL_WAKE_LOCK
+
+            // 向驱动文件中写数据来实现其功能, 这里写的是"PowerManagerService.WakeLocks" 和 "PowerManagerService.Display"
+            ret = write(fd, id, strlen(id));
+            if (ret < 0) {
+                return -errno;
+            }
+            return ret;
+        }
+        int release_wake_lock(const char* id) {
+            initialize_fds();   // 调用 initialize_fds(), 接下来分析
+            if (g_error) return g_error;
+
+            //向驱动文件中写数据来实现其功能
+            ssize_t len = write(g_fds[RELEASE_WAKE_LOCK], id, strlen(id)); // RELEASE_WAKE_LOCK
+            if (len < 0) {
+                return -errno;
+            }
+            return len;
+        }
+    下面看 initialize_fds() 函数在 /hardware/libhardware_legacy/power.c 中代码如下:
+        const char * const OLD_PATHS[] = {
+            "/sys/android_power/acquire_partial_wake_lock",
+            "/sys/android_power/release_wake_lock",
+        };
+        const char * const NEW_PATHS[] = {
+            "/sys/power/wake_lock",
+            "/sys/power/wake_unlock",
+        };
+        static inline void initialize_fds(void) {
+            if (g_initialized == 0) {
+                if(open_file_descriptors(NEW_PATHS) < 0) // 如果 NEW_PATHS 数组中定义的设备文件打开失败
+                    open_file_descriptors(OLD_PATHS);    // 打开 OLD_PATHS 数组中定义的设备文件
+                g_initialized = 1;
+            }
+        }
+    注:
+        Android 实现防止系统休眠的功能是通过向设备文件"/sys/power/wake_lock"中写数据来完成的.
+        如果写的是"PowerManagerService.WakeLocks"字串, 系统将不能进入休眠状态, 但是屏幕会关闭;
+        如果写的是"PowerManagerService.Display"字串, 则连屏幕也不会关闭;
+        如果系统要恢复休眠, 再向设备文件中写入同样的字符串就可以了.
+
+
+
+17.2.3 理解 updatePowerStateLocked()方法
+    前面分析过的 PMS.systemReady, PM.userActivity(), PM.goToSleep, PMS.acquireWakeLockInternal(), PMS.releaseWakeLockInternal函数
+    最终都会调用updatePowerStateLocked(), updatePowerStateLocked()方法是 PMS 的核心, 前面没有具体分析, 接下来开始分析此函数.
+    PMS 中 updatePowerStateLocked()函数代码如下:
+        private void updatePowerStateLocked() {
+            if (!mSystemReady || mDirty == 0) {
+                return;
+            }
+            if (!Thread.holdsLock(mLock)) {
+                Slog.wtf(TAG, "Power manager lock was not held when calling updatePowerStateLocked");
+            }
+            try {
+                // Phase 0: 更新基本状态: mIsPowered,mPlugType,mBatteryLevel,mBatteryLevelLow.
+                updateIsPoweredLocked(mDirty);
+                updateStayOnLocked(mDirty);     //更新 mStayOn, 可能更新 mDirty
+                updateScreenBrightnessBoostLocked(mDirty);
+
+                // Phase 1: 更新 wakefulness 的值.
+                // Loop because the wake lock and user activity computations are influenced by changes in wakefulness.
+                final long now = SystemClock.uptimeMillis();
+                int dirtyPhase2 = 0;
+                // 注意不要被此处的for无限循环吓住了, 以为它会循环很多次, 其实最多两次它就结束了, 这一点后面会分析.
+                for (;;) {
+                    int dirtyPhase1 = mDirty;
+                    dirtyPhase2 |= dirtyPhase1;
+                    mDirty = 0;
+
+                    updateWakeLockSummaryLocked(dirtyPhase1);   // updateWakeLockSummaryLocked()
+                    updateUserActivitySummaryLocked(now, dirtyPhase1);  // updateUserActivitySummaryLocked()
+                    if (!updateWakefulnessLocked(dirtyPhase1)) {    //updateWakefulnessLocked()
+                        break;
+                    }
+                }
+
+                // Phase 2: Lock profiles that became inactive/not kept awake.
+                updateProfilesLocked(now);
+
+                // Phase 3: 更新显示设备状态, 下节将详细分析这个方法.
+                final boolean displayBecameReady = updateDisplayPowerStateLocked(dirtyPhase2);
+
+                // Phase 4: 如果条件合适, 这个方法将启动屏保, Update dream state (depends on display ready signal).
+                updateDreamLocked(dirtyPhase2, displayBecameReady);
+
+                // Phase 5: 发送通知, Send notifications, if needed.
+                finishWakefulnessChangeIfNeededLocked();
+
+                // Phase 6: Update suspend blocker.
+                // Because we might release the last suspend blocker here, we need to make sure we finished everything else first!
+                updateSuspendBlockerLocked();   // Updates the suspend blocker that keeps the CPU alive.
+            }
+        }
+    updatePowerStateLocked()方法不太长, 但是不太容易理解, 下面将仔细解释.
+
+    接下来看 updateIsPoweredLocked()函数代码:
+        private void updateIsPoweredLocked(int dirty) {
+            if ((dirty & DIRTY_BATTERY_STATE) != 0) {
+                final boolean wasPowered = mIsPowered;
+                final int oldPlugType = mPlugType;
+                final boolean oldLevelLow = mBatteryLevelLow;
+                // mIsPowered 表示是否在充电
+                mIsPowered = mBatteryManagerInternal.isPowered(BatteryManager.BATTERY_PLUGGED_ANY);
+                // mPlugType 表示充电的类型
+                mPlugType = mBatteryManagerInternal.getPlugType();
+                // mBatteryLevel 表示当前电池电量的等级
+                mBatteryLevel = mBatteryManagerInternal.getBatteryLevel();
+                // mBatteryLevel 表示当前电池电量的等级
+                mBatteryLevelLow = mBatteryManagerInternal.getBatteryLevelLow();
+
+                if (wasPowered != mIsPowered || oldPlugType != mPlugType) {
+                    mDirty |= DIRTY_IS_POWERED;
+
+                    // Update wireless dock detection state.
+                    final boolean dockedOnWirelessCharger = mWirelessChargerDetector.update(mIsPowered, mPlugType);
+
+                    final long now = SystemClock.uptimeMillis();
+                    if (shouldWakeUpWhenPluggedOrUnpluggedLocked(wasPowered, oldPlugType, dockedOnWirelessCharger)) {
+                        wakeUpNoUpdateLocked(now, "android.server.power:POWER", Process.SYSTEM_UID, mContext.getOpPackageName(), Process.SYSTEM_UID);
+                    }
+                    userActivityNoUpdateLocked(now, PowerManager.USER_ACTIVITY_EVENT_OTHER, 0, Process.SYSTEM_UID);
+
+                    if (mBootCompleted) {
+                        if (mIsPowered && !BatteryManager.isPlugWired(oldPlugType) && BatteryManager.isPlugWired(mPlugType)) {
+                            mNotifier.onWiredChargingStarted();
+                        } else if (dockedOnWirelessCharger) {
+                            mNotifier.onWirelessChargingStarted(mBatteryLevel);
+                        }
+                    }
+                }
+                mBatterySaverStateMachine.setBatteryStatus(mIsPowered, mBatteryLevel, mBatteryLevelLow);
+            }
+        }
+        注:
+            这个方法主要通过调用 BatteryService 的接口来更新几个成员变量的值.
+
+    接下来看 updateStayOnLocked()函数代码:
+        private void updateStayOnLocked(int dirty) {
+            if ((dirty & (DIRTY_BATTERY_STATE | DIRTY_SETTINGS)) != 0) {
+                final boolean wasStayOn = mStayOn;
+                if (mStayOnWhilePluggedInSetting != 0 && !isMaximumScreenOffTimeoutFromDeviceAdminEnforcedLocked()) {
+                    mStayOn = mBatteryManagerInternal.isPowered(mStayOnWhilePluggedInSetting);
+                } else {
+                    mStayOn = false;
+                }
+                if (mStayOn != wasStayOn) {
+                    mDirty |= DIRTY_STAY_ON;
+                }
+            }
+        }
+        注:
+            mStayOn如果等于true, 屏幕将长亮不灭;
+            在 Settings 中可以设置充电时屏幕长亮, 如果Settings中设置了该选项, updateStayOnLocked()函数中如果检测到正在充电, 会将mStayOn的值设置为true.
+
+    接下来看for (;;)循环中的代码:
+        1. 注意不要被此处的 for (;;) 无限循环吓住了, 以为它会循环很多次, 其实最多两次它就结束了, 这一点后面会分析.
+
+        2. 循环调用中第一个方法 的updateWakeLockSummaryLocked()的主要作用是根据 PMS 中所有 WakeLock 对象的类型计算出一个最终的类型集合, 并保存在变量mWakeLockSummary中.
+        不管系统中一共创建多少个 WakeLock 对象, 一个就足以阻止系统休眠, 因此, 这里把所有 WakeLock 对象的状态总结后放在一个变量中.
+        应用创建 WakeLock 对象时会指定对象的类型, 这个类型将作为参数传递到 PMS 中, PMS 中 WakeLock 的类型有:
+            PARTIAL_WAKE_LOCK       //只保持CPU运行, 屏幕背光和键盘背光关闭.
+            FULL_WAKE_LOCK          //保持CPU运行, 屏幕背光和键盘背光都不关闭.
+            SCREEN_BRIGHT_WAKE_LOCK //屏幕背光不关闭, 但是键盘背光关闭.
+            SCREEN_DIM_WAKE_LOCK    //屏幕背光不关闭, 键盘背光关闭. 但是屏幕背光可以变暗.
+            PROXIMITY_SCREEN_OFF_WAKE_LOCK //这个类型并不是用来阻止系统进入休眠, 而是用来打开距离传感器控制屏幕开关的功能. 如果应用持有这种类型的 WakeLock, 当距离传感器被遮挡时, 屏幕将被关闭, 在打电话时经常使用这个功能.
+            DOZE_WAKE_LOCK          //这个类型用来让屏保管理器实现 doze 模式.
+            DRAW_WAKE_LOCK
+        注意以上这些类型可以混用.
+
+        3. 循环调用中第二个方法 updateUserActivitySummaryLocked() 的主要作用根据最后一次调用 userActivity() 的时间, 计算现在是否可以将表示屏幕状态的变量 mUserActivitySummary 的值, 并将其设置为USER_ACTIVITY_SCREEN_DIM 或者 USER_ACTIVITY_SCREEN_BRIGHT.
+        如果时间还没到, 则发送一个定时消息 MSG_USER_ACTIVITY_TIMEOUT, 当处理消息的时间到了以后, 会在消息的处理方法 handleUserActivityTimeout() 中重新调用 updatePowerStateLocked()方法.
+        再次调用 updatePowerStateLocked()方法时, 会根据当前状态重新计算 mUserActivitySummary 的值.
+
+        4. 循环调用中第三个方法 updateWakefulnessLocked() 是结束循环的关键, 如果它的返回值是true, 表示 PMS 的状态发生了变化, 将继续循环, 然后重新调用前面的两个方法来更新,
+        而第二次调用 updateWakefulnessLocked() 通常都会返回false, 这样就跳出了循环.
+            private boolean updateWakefulnessLocked(int dirty) {
+                boolean changed = false;
+                // 首先判断 dirty 的值
+                if ((dirty & (DIRTY_WAKE_LOCKS | DIRTY_USER_ACTIVITY | DIRTY_BOOT_COMPLETED | DIRTY_WAKEFULNESS | DIRTY_STAY_ON | DIRTY_PROXIMITY_POSITIVE | DIRTY_DOCK_STATE)) != 0) {
+                    // 此处要求 mWakefulness 等于 WAKEFULNESS_AWAKE, 并且 isItBedTimeYetLocked() 返回true才继续执行, 否则方法结束并返回false, 返回false就会跳出循环.
+                    if (mWakefulness == WAKEFULNESS_AWAKE && isItBedTimeYetLocked()) {
+                        // 检查系统有没有设置睡眠时间到启动屏保或者插在Dock上启动屏保
+                        final long time = SystemClock.uptimeMillis();
+                        if (shouldNapAtBedTimeLocked()) {
+                            // 如果设置了执行napNoUpdateLocked
+                            changed = napNoUpdateLocked(time, Process.SYSTEM_UID);
+                        } else {
+                            // 如果没有设置执行goToSleepNoUpdateLocked
+                            changed = goToSleepNoUpdateLocked(time, PowerManager.GO_TO_SLEEP_REASON_TIMEOUT, 0, Process.SYSTEM_UID);
+                        }
+                    }
+                }
+                return changed;
+            }
+            // 第一个条件是 mBootCompleted, 表示启动是否完成(启动没完成前是不能睡眠的), 这个变量启动后就是true了.
+            // 第二个条件是 isBeingKeptAwakeLocked()方法的返回值, 如果系统目前不能睡眠, 这个方法将返回true.
+            private boolean isItBedTimeYetLocked() {
+                return mBootCompleted && !isBeingKeptAwakeLocked(); //启动完成并且系统不能睡眠, 返回true, 启动没完成前是不能睡眠的
+            }
+            // 这里判断系统是否能睡眠的几个变量前面都讲过了, 前面讲到的一些方法中更新这些变量就是为了用在这里. 此方法只有在系统能够进入休眠状态才返回true.
+            private boolean isBeingKeptAwakeLocked() {
+                return mStayOn
+                        || mProximityPositive
+                        || (mWakeLockSummary & WAKE_LOCK_STAY_AWAKE) != 0
+                        || (mUserActivitySummary & (USER_ACTIVITY_SCREEN_BRIGHT
+                                | USER_ACTIVITY_SCREEN_DIM)) != 0
+                        || mScreenBrightnessBoostInProgress;
+            }
+
+    接下来看 updateDisplayPowerStateLocked() 方法, 这个方法的作用是根据更新后的 mUserActivitySummary 的值来确定屏幕的状态和亮度, 并设置到DisplayManagerInternal对象中
+    下面一节将会详细分析 pdateDisplayPowerStateLocked() 方法.
+
+    接下来看 updateSuspendBlockerLocked() 函数代码:
+        private void updateSuspendBlockerLocked() {
+            final boolean needWakeLockSuspendBlocker = ((mWakeLockSummary & WAKE_LOCK_CPU) != 0); //检查 mWakeLockSummary 变量是否带有 WAKE_LOCK_CPU 标志
+            final boolean needDisplaySuspendBlocker = needDisplaySuspendBlockerLocked();    //needDisplaySuspendBlocker 将决定是否需要阻止CPU休眠或者保持屏幕长亮
+            final boolean autoSuspend = !needDisplaySuspendBlocker;
+            final boolean interactive = mDisplayPowerRequest.isBrightOrDim();
+
+            if (!autoSuspend && mDecoupleHalAutoSuspendModeFromDisplayConfig) {
+                setHalAutoSuspendModeLocked(false);
+            }
+            if (needWakeLockSuspendBlocker && !mHoldingWakeLockSuspendBlocker) { //如果不能休眠, 调用 native 层的 acquire_wake_lock 函数
+                mWakeLockSuspendBlocker.acquire();
+                mHoldingWakeLockSuspendBlocker = true;
+            }
+            if (needDisplaySuspendBlocker && !mHoldingDisplaySuspendBlocker) { //如果需要保持屏幕长亮, 调用 native 层的 acquire_wake_lock 函数
+                mDisplaySuspendBlocker.acquire();
+                mHoldingDisplaySuspendBlocker = true;
+            }
+            if (mDecoupleHalInteractiveModeFromDisplayConfig) {
+                if (interactive || mDisplayReady) {
+                    setHalInteractiveModeLocked(interactive);
+                }
+            }
+            if (!needWakeLockSuspendBlocker && mHoldingWakeLockSuspendBlocker) { //如果可以休眠, 调用 native 层的 release_wake_lock 函数
+                mWakeLockSuspendBlocker.release();
+                mHoldingWakeLockSuspendBlocker = false;
+            }
+            if (!needDisplaySuspendBlocker && mHoldingDisplaySuspendBlocker) {
+                mDisplaySuspendBlocker.release();
+                mHoldingDisplaySuspendBlocker = false;
+            }
+            if (autoSuspend && mDecoupleHalAutoSuspendModeFromDisplayConfig) { //如果不需要保持屏幕长亮, 调用 native 层的 release_wake_lock 函数
+                setHalAutoSuspendModeLocked(true);
+            }
+        }
+    接下来看 needDisplaySuspendBlockerLocked() 方法如何决定屏幕是否关闭:
+        private boolean needDisplaySuspendBlockerLocked() {
+            // 如果显示设备没准备好,不能关闭屏幕
+            if (!mDisplayReady) {
+                return true;
+            }
+            // 如果屏幕开着或处于变暗的状态, 而且距离传感器没有工作,不能关闭屏幕
+            if (mDisplayPowerRequest.isBrightOrDim()) {
+                if (!mDisplayPowerRequest.useProximitySensor || !mProximityPositive || !mSuspendWhenScreenOffDueToProximityConfig) {
+                    return true;
+                }
+            }
+            //
+            if (mScreenBrightnessBoostInProgress) {
+                return true;
+            }
+            // 可以关闭屏幕
+            return false;
+        }
+
+
+17.2.4 管理显示设备
+    这一节一节将会详细分析上节提到的 pdateDisplayPowerStateLocked() 方法, 函数代码如下:
+        private boolean updateDisplayPowerStateLocked(int dirty) {
+            final boolean oldDisplayReady = mDisplayReady;
+            if ((dirty & (DIRTY_WAKE_LOCKS | DIRTY_USER_ACTIVITY | DIRTY_WAKEFULNESS
+                    | DIRTY_ACTUAL_DISPLAY_POWER_STATE_UPDATED | DIRTY_BOOT_COMPLETED
+                    | DIRTY_SETTINGS | DIRTY_SCREEN_BRIGHTNESS_BOOST | DIRTY_VR_MODE_CHANGED |
+                    DIRTY_QUIESCENT)) != 0) {
+                mDisplayPowerRequest.policy = getDesiredScreenPolicyLocked();//根据服务当前的状态获取屏幕的新状态
+
+                // 获取系统是否设置了屏幕亮度模式为自动变化
+                final boolean autoBrightness;
+                final int screenBrightnessOverride;
+                if (!mBootCompleted) {
+                    autoBrightness = false;
+                    screenBrightnessOverride = mScreenBrightnessSettingDefault;
+                } else if (isValidBrightness(mScreenBrightnessOverrideFromWindowManager)) { //获取屏幕亮度值
+                    autoBrightness = false;
+                    screenBrightnessOverride = mScreenBrightnessOverrideFromWindowManager;
+                } else {
+                    autoBrightness = (mScreenBrightnessModeSetting == Settings.System.SCREEN_BRIGHTNESS_MODE_AUTOMATIC);
+                    screenBrightnessOverride = -1;
+                }
+
+                // Update display power request.
+                mDisplayPowerRequest.screenBrightnessOverride = screenBrightnessOverride;
+                mDisplayPowerRequest.useAutoBrightness = autoBrightness;
+                mDisplayPowerRequest.useProximitySensor = shouldUseProximitySensorLocked();
+                mDisplayPowerRequest.boostScreenBrightness = shouldBoostScreenBrightness();
+
+                updatePowerRequestFromBatterySaverPolicy(mDisplayPowerRequest);
+
+                if (mDisplayPowerRequest.policy == DisplayPowerRequest.POLICY_DOZE) {
+                    mDisplayPowerRequest.dozeScreenState = mDozeScreenStateOverrideFromDreamManager;
+                    if ((mWakeLockSummary & WAKE_LOCK_DRAW) != 0 && !mDrawWakeLockOverrideFromSidekick) {
+                        if (mDisplayPowerRequest.dozeScreenState == Display.STATE_DOZE_SUSPEND) {
+                            mDisplayPowerRequest.dozeScreenState = Display.STATE_DOZE;
+                        }
+                        if (mDisplayPowerRequest.dozeScreenState == Display.STATE_ON_SUSPEND) {
+                            mDisplayPowerRequest.dozeScreenState = Display.STATE_ON;
+                        }
+                    }
+                    mDisplayPowerRequest.dozeScreenBrightness = mDozeScreenBrightnessOverrideFromDreamManager;
+                } else {
+                    mDisplayPowerRequest.dozeScreenState = Display.STATE_UNKNOWN;
+                    mDisplayPowerRequest.dozeScreenBrightness = PowerManager.BRIGHTNESS_DEFAULT;
+                }
+                //
+                mDisplayReady = mDisplayManagerInternal.requestPowerState(mDisplayPowerRequest, mRequestWaitForNegativeProximity);
+                mRequestWaitForNegativeProximity = false;
+
+                if ((dirty & DIRTY_QUIESCENT) != 0) {
+                    sQuiescent = false;
+                }
+            }
+            return mDisplayReady && !oldDisplayReady;
+        }
+    DisplayManagerService 的内部类 LocalService 继承了抽象类 DisplayManagerInternal, DisplayPowerCallbacks 定义在 DisplayManagerInternal 类中.
+    mDisplayManagerInternal.requestPowerState() -> DisplayManagerService.requestPowerState()
+                                                -> DisplayPowerController.requestPowerState()
+                                                -> sendUpdatePowerStateLocked()
+                                                -> updatePowerState()
+                                                -> sendOnStateChangedWithWakelock()
+                                                -> mOnStateChangedRunnable.run()
+                                                -> mCallbacks.onStateChanged()
+    private final Runnable mOnStateChangedRunnable = new Runnable() {
+        @Override
+        public void run() {
+            mCallbacks.onStateChanged();
+            mCallbacks.releaseSuspendBlocker();
+        }
+    };
+    PMS 中成员变量 mDisplayPowerCallbacks 定义如下:
+        private final DisplayManagerInternal.DisplayPowerCallbacks mDisplayPowerCallbacks = new DisplayManagerInternal.DisplayPowerCallbacks() {
+            private int mDisplayState = Display.STATE_UNKNOWN;
+
+            @Override
+            public void onStateChanged() {
+                synchronized (mLock) {
+                    mDirty |= DIRTY_ACTUAL_DISPLAY_POWER_STATE_UPDATED;
+                    updatePowerStateLocked();   //调用 updatePowerStateLocked() 重新开始处理 power系统的状态更新
+                }
+            }
+
+            @Override
+            public void onProximityPositive() {
+                synchronized (mLock) {
+                    mProximityPositive = true;
+                    mDirty |= DIRTY_PROXIMITY_POSITIVE;
+                    updatePowerStateLocked();
+                }
+            }
+
+            @Override
+            public void onProximityNegative() {
+                synchronized (mLock) {
+                    mProximityPositive = false;
+                    mDirty |= DIRTY_PROXIMITY_POSITIVE;
+                    userActivityNoUpdateLocked(SystemClock.uptimeMillis(), PowerManager.USER_ACTIVITY_EVENT_OTHER, 0, Process.SYSTEM_UID);
+                    updatePowerStateLocked();
+                }
+            }
+
+            @Override
+            public void onDisplayStateChange(int state) {
+                synchronized (mLock) {
+                    if (mDisplayState != state) {
+                        mDisplayState = state;
+                        if (state == Display.STATE_OFF) {
+                            if (!mDecoupleHalInteractiveModeFromDisplayConfig) {
+                                setHalInteractiveModeLocked(false);
+                            }
+                            if (!mDecoupleHalAutoSuspendModeFromDisplayConfig) {
+                                setHalAutoSuspendModeLocked(true);
+                            }
+                        } else {
+                            if (!mDecoupleHalAutoSuspendModeFromDisplayConfig) {
+                                setHalAutoSuspendModeLocked(false);
+                            }
+                            if (!mDecoupleHalInteractiveModeFromDisplayConfig) {
+                                setHalInteractiveModeLocked(true);
+                            }
+                        }
+                    }
+                }
+            }
+
+            @Override
+            public void acquireSuspendBlocker() {
+                mDisplaySuspendBlocker.acquire();
+            }
+
+            @Override
+            public void releaseSuspendBlocker() {
+                mDisplaySuspendBlocker.release();
+            }
+
+            @Override
+            public String toString() {
+                synchronized (this) {
+                    return "state=" + Display.stateToString(mDisplayState);
+                }
+            }
+        };
 
 
 
 
 
+17.3 电池管理服务
+    在 PMS 中调用 BatteryService 类的一些接口来获得电池状态, 下面看看 BatteryService 是如何获得电池状态数据的.
+
+17.3.1 BatteryService 类的作用
+    BatteryService 的构造函数代码如下:
+        public BatteryService(Context context) {
+            super(context);
+            mContext = context;
+            mHandler = new Handler(true /*async*/);
+            mLed = new Led(context, getLocalService(LightsManager.class));  //创建 Led 对象
+            // 获取 BatteryStatsService 对象, 主要用来收集系统中各个模块和进程的耗电情况, 通过 BatteryStatsService 记录的数据, 我们可以找到耗电量大的模块然后加以改进.
+            mBatteryStats = BatteryStatsService.getService();
+            // 获取 ActivityManagerInternal 对象
+            mActivityManagerInternal = LocalServices.getService(ActivityManagerInternal.class);
+
+            // 读取系统设定的各种低电量报警值
+            // 表示电量严重不足时的值, 低于这个值,系统将关闭
+            mCriticalBatteryLevel = mContext.getResources().getInteger(com.android.internal.R.integer.config_criticalBatteryWarningLevel);
+            // 表示电量不足时的值, 低于这个值,系统将发出警告
+            mLowBatteryWarningLevel = mContext.getResources().getInteger(com.android.internal.R.integer.config_lowBatteryWarningLevel);
+            // 表示停止电量不足警告时的值, 电量高于这个值时, 系统将停止电量不足的警告
+            mLowBatteryCloseWarningLevel = mLowBatteryWarningLevel + mContext.getResources().getInteger(com.android.internal.R.integer.config_lowBatteryCloseWarningBump);
+            // 表示电池温度太高的值, 高于这个温度, 系统将关机
+            mShutdownBatteryTemperature = mContext.getResources().getInteger(com.android.internal.R.integer.config_shutdownBatteryTemperature);
+
+            mBatteryLevelsEventQueue = new ArrayDeque<>();
+            mMetricsLogger = new MetricsLogger();
+
+            // 监听下面的设备文件: 无效的充电设备
+            // watch for invalid charger messages if the invalid_charger switch exists
+            if (new File("/sys/devices/virtual/switch/invalid_charger/state").exists()) {
+                // 创建 UEventObserver 对象, 这个对象是一个用于监听UEvent事件的对象, 这里主要用于监听设备插入了无效充电器的事件, 事件发生时将会调用该对象的 onUEvent 设备文件方法.
+                UEventObserver invalidChargerObserver = new UEventObserver() {
+                    @Override
+                    public void onUEvent(UEvent event) {
+                        final int invalidCharger = "1".equals(event.get("SWITCH_STATE")) ? 1 : 0;
+                        synchronized (mLock) {
+                            if (mInvalidCharger != invalidCharger) {
+                                // 设置mInvalidCharger, 这样外界通过 BatteryService 就能查询充电器是否匹配.
+                                mInvalidCharger = invalidCharger;
+                            }
+                        }
+                    }
+                };
+                invalidChargerObserver.startObserving("DEVPATH=/devices/virtual/switch/invalid_charger");
+            }
+        }
+        @Override
+        public void onStart() {
+            registerHealthCallback();   // 注册回调
+
+            mBinderService = new BinderService();               // 创建 BinderService 对象
+            publishBinderService("battery", mBinderService);    // 连接 "battery" 服务
+            mBatteryPropertiesRegistrar = new BatteryPropertiesRegistrar();         // 创建 BatteryPropertiesRegistrar 对象,
+            publishBinderService("batteryproperties", mBatteryPropertiesRegistrar); // 连接 "batteryproperties" 服务
+            publishLocalService(BatteryManagerInternal.class, new LocalService());  // 注册本地服务
+        }
+        注:
+            BatteryPropertiesRegistrar 是一个 Binder 服务类, 因此 "batteryproperties" 服务能通过它传递回数据, 这里传递回来的数据类型是 BatteryProperties.
+            BatteryProperties 类的定义如下:
+            public class BatteryProperties implements Parcelable {
+                public boolean chargerAcOnline;         // 正在用AC充电器充电
+                public boolean chargerUsbOnline;        // 正在用USB充电器充电
+                public boolean chargerWirelessOnline;   // 正在用无线充电器充电
+                public int maxChargingCurrent;
+                public int maxChargingVoltage;          // 最大电压
+                public int batteryStatus;               // 电池状态值
+                public int batteryHealth;               // 电池的健康度
+                public boolean batteryPresent;          // 设备是否在使用电池供电
+                public int batteryLevel;                // 电量级别
+                public int batteryVoltage;              // 电压值
+                public int batteryTemperature;          // 电池温度
+                public int batteryFullCharge;
+                public int batteryChargeCounter;
+                public String batteryTechnology;        // 电池的制造商信息
+
+17.3.2 Healthd 守护进程
+    1. BatteryService 中使用的 batterypropreg 服务位于 healthd 守护进程中, healthd 在 /system/core/healthd/healthd.rc 文件中的定义如下:
+        service healthd /system/bin/healthd
+            class hal
+            critical
+            group root system wakelock
+
+    2. health-hal-2-0 在 /system/core/healthd/android.hardware.health@2.0-service.rc 文件中的定义如下:
+        service health-hal-2-0 /vendor/bin/hw/android.hardware.health@2.0-service
+            class hal
+            user system
+            group system
+            file /dev/kmsg w
+    这两个服务都属于 hal 分组, 后续待补充....
+
+    3. healthd 模块的 main() 函数在 /system/core/healthd/HealthServiceHealthd.cpp 文件中的代码如下:
+        int main() {
+            return health_service_main("backup");   //接下来分析
+        }
+
+    4. health_service_main() 函数在 /hardware/interfaces/health/2.0/utils/libhealthservice/HealthServiceCommon.cpp 文件中代码如下:
+        extern int healthd_main(void);
+        int health_service_main(const char* instance) {
+            gInstanceName = instance;
+            if (gInstanceName.empty()) {
+                gInstanceName = "default";
+            }
+            healthd_mode_ops = &healthd_mode_service_2_0_ops;
+            return healthd_main();
+        }
+
+    5. healthd_main() 函数在 /hardware/interfaces/health/2.0/default/healthd_common.cpp 文件中代码如下:
+        int healthd_main() {
+            int ret;
+            if (!healthd_mode_ops) {
+                exit(1);
+            }
+            ret = healthd_init();   //接下来分析
+            if (ret) {
+                exit(2);
+            }
+            healthd_mainloop();     // 进入主循环, 接下来分析
+            return 3;
+        }
+
+    6. healthd_init() 函数在 /hardware/interfaces/health/2.0/default/healthd_common.cpp 文件中代码如下:
+        static int healthd_init() {
+            epollfd = epoll_create(MAX_EPOLL_EVENTS);  // 创建epoll驱动
+            if (epollfd == -1) {
+                return -1;
+            }
+            healthd_mode_ops->init(&healthd_config);
+            wakealarm_init();       // 创建一个定时器的文件句柄
+            uevent_init();          // 初始化uevent环境
+            return 0;
+        }
+
+    7. wakealarm_init() 函数在 /hardware/interfaces/health/2.0/default/healthd_common.cpp 文件中代码如下:
+        static void wakealarm_init(void) {
+            // 调用 timerfd_create 创建一个定时器的文件句柄, 保存在全局变量 wakealarm_fd 中
+            wakealarm_fd = timerfd_create(CLOCK_BOOTTIME_ALARM, TFD_NONBLOCK);
+            if (wakealarm_fd == -1) {
+                KLOG_ERROR(LOG_TAG, "wakealarm_init: timerfd_create failed\n");
+                return;
+            }
+
+            // 把 wakealarm_fd 加入到 poll 的监听列表
+            if (healthd_register_event(wakealarm_fd, wakealarm_event, EVENT_WAKEUP_FD))
+                KLOG_ERROR(LOG_TAG, "Registration of wakealarm event failed\n");
+            // 通过 wakealarm_set_interval 设置定时器的超时时间
+            wakealarm_set_interval(healthd_config.periodic_chores_interval_fast);
+        }
+
+    8. healthd_mainloop() 函数在 /hardware/interfaces/health/2.0/default/healthd_common.cpp 文件中代码如下:
+        static void healthd_mainloop(void) {
+            int nevents = 0;
+            while (1) {
+                struct epoll_event events[eventct];
+                int timeout = awake_poll_interval;
+                int mode_timeout;
+
+                /* nevents等于0表示没有Event, 这是调用periodic_chores(), Don't wait for first timer timeout to run periodic chores */
+                if (!nevents) periodic_chores();
+
+                healthd_mode_ops->heartbeat();
+
+                mode_timeout = healthd_mode_ops->preparetowait();
+                if (timeout < 0 || (mode_timeout > 0 && mode_timeout < timeout)) timeout = mode_timeout;
+                nevents = epoll_wait(epollfd, events, eventct, timeout);
+                if (nevents == -1) {
+                    if (errno == EINTR) continue;
+                    break;
+                }
+
+                for (int n = 0; n < nevents; ++n) {
+                    if (events[n].data.ptr) (*(void (*)(int))events[n].data.ptr)(events[n].events);     //调用事件的处理函数
+                }
+            }
+            return;
+        }
+        注:
+            healthd_mainloop()函数比较简单, 通过epoll 来监听 wakealarm_fd, 句柄的状态, 一旦有数据到来就会从 epoll_wait 的调用中返回.
+            当监听到定时器的事件后, 定时器事件的处理函数 wakealarm_event() 将会被调用.
+
+    9. wakealarm_event() 函数在 /hardware/interfaces/health/2.0/default/healthd_common.cpp 文件中代码如下:
+        static void wakealarm_event(uint32_t /*epevents*/) {
+            unsigned long long wakeups;
+            if (read(wakealarm_fd, &wakeups, sizeof(wakeups)) == -1) {
+                return;
+            }
+            periodic_chores();
+        }
+        static void periodic_chores() {
+            healthd_battery_update();
+        }
+        static void healthd_battery_update(void) {
+            Health::getImplementation()->update();
+        }
+
+    10. update() 函数在 /hardware/interfaces/health/2.0/default/Health.cpp 文件中代码如下:
+        Return<Result> Health::update() {
+            if (!healthd_mode_ops || !healthd_mode_ops->battery_update) {
+                return Result::UNKNOWN;
+            }
+
+            // 调用battery_monitor_的update()函数来读取电池的状态, Retrieve all information and call healthd_mode_ops->battery_update, which calls notifyListeners.
+            bool chargerOnline = battery_monitor_->update();
+
+            // 根据 chargerOnline 的返回值来决定是否更新定时器的时间周期, adjust uevent / wakealarm periods.
+            healthd_battery_update_internal(chargerOnline);
+
+            return Result::SUCCESS;
+        }
+    在这样的定时器作用下, 系统中电池的状态会持续更新.
 
 
 
+17.3.3 读取电池的各种参数 - BatteryMonitor 类
+    BatteryMonitor 的作用是从设备文件中读取电池的各种参数并返回给上层应用, 代码路径 /system/core/healthd/BatteryMonitor.cpp
 
+    Health 的构造函数 /hardware/interfaces/health/2.0/default/Health.cpp 代码如下:
+        Health::Health(struct healthd_config* c) {
+            healthd_board_init(c);
+            battery_monitor_ = std::make_unique<BatteryMonitor>();  // 创建 BatteryMonitor 对象
+            battery_monitor_->init(c);                              // 调用它的 init() 函数
+        }
 
+    BatteryMonitor 的 init() 函数 /system/core/healthd/BatteryMonitor.cpp 定义如下:
+        define POWER_SUPPLY_SUBSYSTEM "power_supply"
+        #define POWER_SUPPLY_SYSFS_PATH "/sys/class/" POWER_SUPPLY_SUBSYSTEM
 
+        void BatteryMonitor::init(struct healthd_config *hc) {
+            String8 path;
+            char pval[PROPERTY_VALUE_MAX];
 
+            mHealthdConfig = hc;
+            std::unique_ptr<DIR, decltype(&closedir)> dir(opendir(POWER_SUPPLY_SYSFS_PATH), closedir);  // 打开目录 /sys/class/power_supply
+            if (dir == NULL) {
+            } else {
+                struct dirent* entry;
 
+                while ((entry = readdir(dir.get()))) {      // 读取目录中的文件
+                    const char* name = entry->d_name;
 
+                    if (!strcmp(name, ".") || !strcmp(name, ".."))
+                        continue;
 
+                    // Look for "type" file in each subdirectory
+                    path.clear();
+                    path.appendFormat("%s/%s/type", POWER_SUPPLY_SYSFS_PATH, name);
+                    switch(readPowerSupplyType(path)) {
+                        case ANDROID_POWER_SUPPLY_TYPE_AC:
+                        case ANDROID_POWER_SUPPLY_TYPE_USB:
+                        case ANDROID_POWER_SUPPLY_TYPE_WIRELESS:
+                            path.clear();
+                            path.appendFormat("%s/%s/online", POWER_SUPPLY_SYSFS_PATH, name);
+                            if (access(path.string(), R_OK) == 0)
+                                mChargerNames.add(String8(name));
+                            break;
 
+                        case ANDROID_POWER_SUPPLY_TYPE_BATTERY:
+                            mBatteryDevicePresent = true;
 
+                            if (mHealthdConfig->batteryStatusPath.isEmpty()) {
+                                path.clear();
+                                path.appendFormat("%s/%s/status", POWER_SUPPLY_SYSFS_PATH, name);
+                                if (access(path, R_OK) == 0)
+                                    mHealthdConfig->batteryStatusPath = path;
+                            }
+                            if (mHealthdConfig->batteryHealthPath.isEmpty()) {
+                                path.clear();
+                                path.appendFormat("%s/%s/health", POWER_SUPPLY_SYSFS_PATH, name);
+                                if (access(path, R_OK) == 0)
+                                    mHealthdConfig->batteryHealthPath = path;
+                            }
+                            if (mHealthdConfig->batteryPresentPath.isEmpty()) {
+                                path.clear();
+                                path.appendFormat("%s/%s/present", POWER_SUPPLY_SYSFS_PATH, name);
+                                if (access(path, R_OK) == 0)
+                                    mHealthdConfig->batteryPresentPath = path;
+                            }
+                            if (mHealthdConfig->batteryCapacityPath.isEmpty()) {
+                                path.clear();
+                                path.appendFormat("%s/%s/capacity", POWER_SUPPLY_SYSFS_PATH, name);
+                                if (access(path, R_OK) == 0)
+                                    mHealthdConfig->batteryCapacityPath = path;
+                            }
+                            if (mHealthdConfig->batteryVoltagePath.isEmpty()) {
+                                path.clear();
+                                path.appendFormat("%s/%s/voltage_now", POWER_SUPPLY_SYSFS_PATH, name);
+                                if (access(path, R_OK) == 0) {
+                                    mHealthdConfig->batteryVoltagePath = path;
+                                }
+                            }
+                            if (mHealthdConfig->batteryFullChargePath.isEmpty()) {
+                                path.clear();
+                                path.appendFormat("%s/%s/charge_full", POWER_SUPPLY_SYSFS_PATH, name);
+                                if (access(path, R_OK) == 0)
+                                    mHealthdConfig->batteryFullChargePath = path;
+                            }
+                            if (mHealthdConfig->batteryCurrentNowPath.isEmpty()) {
+                                path.clear();
+                                path.appendFormat("%s/%s/current_now", POWER_SUPPLY_SYSFS_PATH, name);
+                                if (access(path, R_OK) == 0)
+                                    mHealthdConfig->batteryCurrentNowPath = path;
+                            }
+                            if (mHealthdConfig->batteryCycleCountPath.isEmpty()) {
+                                path.clear();
+                                path.appendFormat("%s/%s/cycle_count", POWER_SUPPLY_SYSFS_PATH, name);
+                                if (access(path, R_OK) == 0)
+                                    mHealthdConfig->batteryCycleCountPath = path;
+                            }
+                            if (mHealthdConfig->batteryCurrentAvgPath.isEmpty()) {
+                                path.clear();
+                                path.appendFormat("%s/%s/current_avg", POWER_SUPPLY_SYSFS_PATH, name);
+                                if (access(path, R_OK) == 0)
+                                    mHealthdConfig->batteryCurrentAvgPath = path;
+                            }
+                            if (mHealthdConfig->batteryChargeCounterPath.isEmpty()) {
+                                path.clear();
+                                path.appendFormat("%s/%s/charge_counter", POWER_SUPPLY_SYSFS_PATH, name);
+                                if (access(path, R_OK) == 0)
+                                    mHealthdConfig->batteryChargeCounterPath = path;
+                            }
+                            if (mHealthdConfig->batteryTemperaturePath.isEmpty()) {
+                                path.clear();
+                                path.appendFormat("%s/%s/temp", POWER_SUPPLY_SYSFS_PATH, name);
+                                if (access(path, R_OK) == 0) {
+                                    mHealthdConfig->batteryTemperaturePath = path;
+                                }
+                            }
+                            if (mHealthdConfig->batteryTechnologyPath.isEmpty()) {
+                                path.clear();
+                                path.appendFormat("%s/%s/technology", POWER_SUPPLY_SYSFS_PATH, name);
+                                if (access(path, R_OK) == 0)
+                                    mHealthdConfig->batteryTechnologyPath = path;
+                            }
+                            break;
+                        case ANDROID_POWER_SUPPLY_TYPE_UNKNOWN:
+                            break;
+                    }
+                }
+            }
 
+            // Typically the case for devices which do not have a battery and and are always plugged into AC mains.
+            if (!mBatteryDevicePresent) {
+                KLOG_WARNING(LOG_TAG, "No battery devices found\n");
+                hc->periodic_chores_interval_fast = -1;
+                hc->periodic_chores_interval_slow = -1;
+            } else {
+                // 打印 Log
+            }
 
+            if (property_get("ro.boot.fake_battery", pval, NULL) > 0 && strtol(pval, NULL, 10) != 0) {
+                mBatteryFixedCapacity = FAKE_BATTERY_CAPACITY;
+                mBatteryFixedTemperature = FAKE_BATTERY_TEMPERATURE;
+            }
+        }
+        注意:
+            /sys/class/power_supply/battery目录存放的是电池信息.
+            /sys/class/power_supply/目录下有很多文件, 每个文件对应电池的一种属性, 文件的内容就是各个属性当前的值.
+            usb 目录表示USB充电器的信息, 里面的online文件内容为1表示正在使用usb充电.
+            wireless 目录保存的是无线充电器的信息.
+            ups, usb_dcp, usb_cdp 和 usb_aca 目录则分别表示不同类型的AC充电器信息.
 
+    init() 函数的主要功能是生成所有这些文件的文件名并保存到成员变量中,方便以后读取.
+    完成这个工作后, init() 函数创建了 BatteryPropertiesRegistrar 对象, 这个对象是一个 Binder 服务对象, 它就是在 BatteryService 中使用的batterypropreg服务.
 
+    BatteryMonitor 类的 update() 函数用来读取电池信息, 前面介绍了, 在healthd 的 healthd_mainloop()函数中会周期性的调用这个函数.
+    接下来看 update() 函数在 BatteryMonitor 类中的代码如下:
+        bool BatteryMonitor::update(void) {
+            bool logthis;
 
+            initBatteryProperties(&props);  // 创建 BatteryProperties 对象
 
+            if (!mHealthdConfig->batteryPresentPath.isEmpty())
+                props.batteryPresent = getBooleanField(mHealthdConfig->batteryPresentPath);
+            else
+                props.batteryPresent = mBatteryDevicePresent;
+
+            props.batteryLevel = mBatteryFixedCapacity ? mBatteryFixedCapacity : getIntField(mHealthdConfig->batteryCapacityPath);
+            props.batteryVoltage = getIntField(mHealthdConfig->batteryVoltagePath) / 1000;
+
+            if (!mHealthdConfig->batteryCurrentNowPath.isEmpty())
+                props.batteryCurrent = getIntField(mHealthdConfig->batteryCurrentNowPath) / 1000;
+
+            if (!mHealthdConfig->batteryFullChargePath.isEmpty())
+                props.batteryFullCharge = getIntField(mHealthdConfig->batteryFullChargePath);
+
+            if (!mHealthdConfig->batteryCycleCountPath.isEmpty())
+                props.batteryCycleCount = getIntField(mHealthdConfig->batteryCycleCountPath);
+
+            if (!mHealthdConfig->batteryChargeCounterPath.isEmpty())
+                props.batteryChargeCounter = getIntField(mHealthdConfig->batteryChargeCounterPath);
+
+            props.batteryTemperature = mBatteryFixedTemperature ? mBatteryFixedTemperature : getIntField(mHealthdConfig->batteryTemperaturePath);
+
+            std::string buf;
+
+            if (readFromFile(mHealthdConfig->batteryStatusPath, &buf) > 0)
+                props.batteryStatus = getBatteryStatus(buf.c_str());
+
+            if (readFromFile(mHealthdConfig->batteryHealthPath, &buf) > 0)
+                props.batteryHealth = getBatteryHealth(buf.c_str());
+
+            if (readFromFile(mHealthdConfig->batteryTechnologyPath, &buf) > 0)
+                props.batteryTechnology = String8(buf.c_str());
+
+            unsigned int i;
+            double MaxPower = 0;
+
+            //读取目录 /sys/class/power_supply 下的各种文件信息
+            for (i = 0; i < mChargerNames.size(); i++) {
+                String8 path;
+                path.appendFormat("%s/%s/online", POWER_SUPPLY_SYSFS_PATH, mChargerNames[i].string());
+                if (getIntField(path)) {
+                    path.clear();
+                    path.appendFormat("%s/%s/type", POWER_SUPPLY_SYSFS_PATH, mChargerNames[i].string());
+                    switch(readPowerSupplyType(path)) {
+                    case ANDROID_POWER_SUPPLY_TYPE_AC:
+                        props.chargerAcOnline = true;
+                        break;
+                    case ANDROID_POWER_SUPPLY_TYPE_USB:
+                        props.chargerUsbOnline = true;
+                        break;
+                    case ANDROID_POWER_SUPPLY_TYPE_WIRELESS:
+                        props.chargerWirelessOnline = true;
+                        break;
+                    default:
+                        KLOG_WARNING(LOG_TAG, "%s: Unknown power supply type\n", mChargerNames[i].string());
+                    }
+                    path.clear();
+                    path.appendFormat("%s/%s/current_max", POWER_SUPPLY_SYSFS_PATH, mChargerNames[i].string());
+                    int ChargingCurrent = (access(path.string(), R_OK) == 0) ? getIntField(path) : 0;
+
+                    path.clear();
+                    path.appendFormat("%s/%s/voltage_max", POWER_SUPPLY_SYSFS_PATH, mChargerNames[i].string());
+
+                    int ChargingVoltage =
+                        (access(path.string(), R_OK) == 0) ? getIntField(path) :
+                        DEFAULT_VBUS_VOLTAGE;
+
+                    double power = ((double)ChargingCurrent / MILLION) * ((double)ChargingVoltage / MILLION);
+                    if (MaxPower < power) {
+                        props.maxChargingCurrent = ChargingCurrent;
+                        props.maxChargingVoltage = ChargingVoltage;
+                        MaxPower = power;
+                    }
+                }
+            }
+
+            logthis = !healthd_board_battery_update(&props);
+
+            healthd_mode_ops->battery_update(&props);
+            return props.chargerAcOnline | props.chargerUsbOnline | props.chargerWirelessOnline;
+        }
+
+    把保存在 props 中的电池信息传递到 BatteryService 中
+        void Health::notifyListeners(HealthInfo* healthInfo) {
+            std::vector<StorageInfo> info;
+            get_storage_info(info);
+
+            std::vector<DiskStats> stats;
+            get_disk_stats(stats);
+
+            int32_t currentAvg = 0;
+
+            struct BatteryProperty prop;
+            status_t ret = battery_monitor_->getProperty(BATTERY_PROP_CURRENT_AVG, &prop);
+            if (ret == OK) {
+                currentAvg = static_cast<int32_t>(prop.valueInt64);
+            }
+
+            healthInfo->batteryCurrentAverage = currentAvg;
+            healthInfo->diskStats = stats;
+            healthInfo->storageInfos = info;
+
+            std::lock_guard<std::mutex> _lock(callbacks_lock_);
+            for (auto it = callbacks_.begin(); it != callbacks_.end();) {
+                auto ret = (*it)->healthInfoChanged(*healthInfo);
+                if (!ret.isOk() && ret.isDeadObject()) {
+                    it = callbacks_.erase(it);
+                } else {
+                    ++it;
+                }
+            }
+        }
 
 
 

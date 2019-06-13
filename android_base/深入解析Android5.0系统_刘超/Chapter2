@@ -1,9 +1,46 @@
-第二章 Android的编译环境－Build系统
+第二章 Android 的编译环境 － Build 系统
 
-<<<<<<< HEAD
+
+
+本章介绍 Android Build 系统的原理及运行机制.
+
+
+
+
+Android 的 Build 系统是基于 GNU Make 和 Shell 构建的一套编译环境.
+
+为了管理整套源码的编译, Android 专门开发了自己的 Build 系统, 这套系统定义了大量的变量和函数,
+无论编写一个产品的配置文件还是一个模块的 Android.mk 文件, 都不用直接和 GNU Make 打交道, 只
+需要理解 Android 提供的编译变量和函数, 就能够方便的将我们开发的模块加入到 Android 的 Build 体系中.
+
+Android 的 Build 系统除了完成对目标(手机)系统的二进制文件, APK 应用程序的编译, 链接, 打包等工作外,还需要生成
+目标文件系统的镜像以及各种配置文件, 同时还要维护各个模块间的依赖关系, 确保某个模块的修改能引起所依赖的文件重新编译
+Android Build 系统的功能非常强大, 能同时支持多架构(x86, arm, mips),多语言(汇编, c/c++, java)和多目标(同时支持多个目标产品).
+
+从大的方面讲, Android 的 Build 系统可以分成三大块:
+    第一块是位于 build/core 目录下的文件, 这是 Android Build 系统的框架和核心.
+    第二块是位于 device 目录下的文件, 存放的是具体产品的配置文件.
+    第三块是各模块的编译文件 Android.mk, 位于模块的源文件目录下.
+
+
 2.1 Android Build系统核心
+    Android Build 系统的核心位于目录 build/core, 这个目录中有几十个 mk 文件以及一些 shell脚本和 perl脚本, 它们构成了 Android Build 系统的基础和框架.
+
+    Android 系统的编译命令就是了解 Android Build 系统的入口.
+        $ . build/envsetup.sh
+        $ lunch
+        $ make
+    下面顺着这三条命令, 一步步分析整个编译过程.
+
+
     2.1.1 编译环境的建立
+        envsetup.sh 文件的作用
+        lunch 命令的功能
+
     2.1.2 Build相关的环境变量
+        执行完lunch命令后系统会打印出当前配置所生成的环境变量, 这些环境变量将影响编译过程.
+
+
     2.1.3 Build系统的层次关系
     2.1.4 分析main.mk文件
     2.1.5 Build系统的编译目标介绍
@@ -28,11 +65,5 @@
     2.4.3 Android签名漏洞分析 
 
 
-=======
->>>>>>> 2f289295a7bee3b9a989b1c4b9e7fe0cf492964d
 
-Android的Build系统是基于GNU Make 和 Shell 构建的一套编译环境.
-Android的Build系统可以分成3大块:
-第一块是位于build/core目录下的文件, 这是Android Build系统的框架和核心.
-第二块是位于device目录下的文件, 存放的是具体产品的配置文件.
-第三块是各模块的编译文件Android.mk, 位于模块的源文件目录下.
+

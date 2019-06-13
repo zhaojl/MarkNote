@@ -1,15 +1,773 @@
-第16章 Android的输入管理
+第16章 Android 的输入管理
 
+
+本章将介绍Android的input事件输入系统, 输入管理模块InputManagerService(以下简称IMS), 以及输入消息的分发过程.
+
+
+16.1 IMS-管理各种输入的服务
+    IMS是Android中管理各种输入的服务, 这里的输入是一个广义的概念, 包括系统所有输入源. 不仅包括了常见的触摸屏和按键, 还包括各种传感器的输入.
+    
+
+16.1.1 服务的启动过程
+  InputManagerService是在SystemServer中创建的, 创建过程如下:
+    (1)SystemServer中的run()函数代码, Java层
+        private void run() {
+            try {
+                startBootstrapServices();
+                startCoreServices();
+                startOtherServices();
+                SystemServerInitThreadPool.shutdown();
+            }
+        }
+    (2)SystemServer中的startOtherServices()函数代码, Java层
+        private void startOtherServices() {
+            InputManagerService inputManager = null;  //创建IMS对象
+            inputManager = new InputManagerService(context);                                                                
+            ConcurrentUtils.waitForFutureNoInterrupt(mSensorServiceStart, START_SENSOR_SERVICE);                         // WMS needs sensor service ready
+            mSensorServiceStart = null;
+            wm = WindowManagerService.main(context, inputManager, mFactoryTestMode != FactoryTest.FACTORY_TEST_LOW_LEVEL, !mFirstBoot, mOnlyCore, new PhoneWindowManager());
+            ServiceManager.addService(Context.WINDOW_SERVICE, wm, false, DUMP_FLAG_PRIORITY_CRITICAL | DUMP_FLAG_PROTO); //把WMS加入到ServiceManager
+            ServiceManager.addService(Context.INPUT_SERVICE, inputManager, false, DUMP_FLAG_PRIORITY_CRITICAL);          //把IMS加入到ServiceManager
+            mActivityManagerService.setWindowManager(wm);
+            wm.onInitReady();
+            inputManager.setWindowManagerCallbacks(wm.getInputMonitor());
+            inputManager.start();                                                                                        //调用IMS的start()方法
+        }
+    (3)IMS的构造函数代码, Java层
+        public InputManagerService(Context context) {
+            this.mContext = context;
+            this.mHandler = new InputManagerHandler(DisplayThread.get().getLooper());   //创建用于处理消息的Handler对象, 传入主线程的Looper
+            mUseDevInputEventForAudioJack = context.getResources().getBoolean(R.bool.config_useDevInputEventForAudioJack);
+            mPtr = nativeInit(this, mContext, mHandler.getLooper().getQueue());         //调用native方法来完成初始化, 传入主线程的消息队列
+            String doubleTouchGestureEnablePath = context.getResources().getString(R.string.config_doubleTouchGestureEnableFile);
+            mDoubleTouchGestureEnableFile = TextUtils.isEmpty(doubleTouchGestureEnablePath) ? null : new File(doubleTouchGestureEnablePath);
+            LocalServices.addService(InputManagerInternal.class, new LocalService());
+        }
+        注意:
+            IMS的成员变量mPtr中将保存Java层的MessageQueue对象创建时在native层创建的与之关联的NativeMessageQueue对象的指针.
+    (4)接下来看com_android_server_input_InputManagerService.cpp中nativeInit()函数代码
+        static jlong nativeInit(JNIEnv* env, jclass, jobject serviceObj, jobject contextObj, jobject messageQueueObj) {
+            sp<MessageQueue> messageQueue = android_os_MessageQueue_getMessageQueue(env, messageQueueObj);
+            if (messageQueue == NULL) {
+                jniThrowRuntimeException(env, "MessageQueue is not initialized.");
+                return 0;
+            }
+            NativeInputManager* im = new NativeInputManager(contextObj, serviceObj, messageQueue->getLooper()); //创建NativeInputManager, 传入Looper
+            im->incStrong(0);
+            return reinterpret_cast<jlong>(im);
+        }
+    (5)接下来看com_android_server_input_InputManagerService.cpp中NativeInputManager的构造函数代码
+        NativeInputManager::NativeInputManager(jobject contextObj, jobject serviceObj, const sp<Looper>& looper) : mLooper(looper), mInteractive(true) {
+          JNIEnv* env = jniEnv();
+          mContextObj = env->NewGlobalRef(contextObj);
+          mServiceObj = env->NewGlobalRef(serviceObj);
+          {
+              AutoMutex _l(mLock);
+              mLocked.systemUiVisibility = ASYSTEM_UI_VISIBILITY_STATUS_BAR_VISIBLE;
+              mLocked.pointerSpeed = 0;
+              mLocked.pointerGesturesEnabled = true;
+              mLocked.showTouches = false;
+              mLocked.pointerCapture = false;
+          }
+          mInteractive = true;
+          sp<EventHub> eventHub = new EventHub();                //创建EventHub对象eventHub
+          mInputManager = new InputManager(eventHub, this, this);//创建InputManager对象, 传入eventHub
+      }
+      注意以下类的继承关系:
+            InputListenerInterface -> InputDispatcherInterface|QueuedInputListener -> InputDispatcher
+            InputDispatcherPolicyInterface|InputReaderPolicyInterface|PointerControllerPolicyInterface -> NativeInputManager
+    (6)接下来看InputManager.cpp 中 InputManager的构造函数
+        InputManager::InputManager(
+                const sp<EventHubInterface>& eventHub,
+                const sp<InputReaderPolicyInterface>& readerPolicy,
+                const sp<InputDispatcherPolicyInterface>& dispatcherPolicy) {
+            mDispatcher = new InputDispatcher(dispatcherPolicy);            //创建InputDispatcher对象
+            mReader = new InputReader(eventHub, readerPolicy, mDispatcher); //创建InputReader对象, 传入eventHub
+            initialize();                                                   //调用initialize函数
+        }
+    (7)接下来看InputManager.cpp 中 initialize()函数代码
+        void InputManager::initialize() {
+            mReaderThread = new InputReaderThread(mReader);             //创建Reader线程, 但是没有启动线程
+            mDispatcherThread = new InputDispatcherThread(mDispatcher); //创建Dispatcher线程, 但是没有启动线程
+        }
+    (8)接下来看IMS的start()函数代码, Java层
+        public void start() {
+            nativeStart(mPtr);                       //调用本地函数nativeStart()
+            Watchdog.getInstance().addMonitor(this); //加入到Watchdog的监控中.
+            registerPointerSpeedSettingObserver();
+            registerShowTouchesSettingObserver();
+            registerAccessibilityLargePointerSettingObserver();
+            mContext.registerReceiver(new BroadcastReceiver() {
+                @Override
+                public void onReceive(Context context, Intent intent) {
+                    updatePointerSpeedFromSettings();
+                    updateShowTouchesFromSettings();
+                    updateAccessibilityLargePointerFromSettings();
+                }
+            }, new IntentFilter(Intent.ACTION_USER_SWITCHED), null, mHandler);
+            updatePointerSpeedFromSettings();
+            updateShowTouchesFromSettings();
+            updateAccessibilityLargePointerFromSettings();
+        }
+    (9)接下来看com_android_server_input_InputManagerService.cpp 中 nativeStart()函数代码
+        static void nativeStart(JNIEnv* env, jclass /* clazz */, jlong ptr) {
+            NativeInputManager* im = reinterpret_cast<NativeInputManager*>(ptr);
+            status_t result = im->getInputManager()->start();     //调用(4)中创建的NativeInputManager对象的start()函数
+            if (result) {
+                jniThrowRuntimeException(env, "Input manager could not be started.");
+            }
+        }
+    (10)接下来看InputManager.cpp中的start()函数代码
+        status_t InputManager::start() {
+            status_t result = mDispatcherThread->run("InputDispatcher", PRIORITY_URGENT_DISPLAY) //启动(7)中创建的Dispatcher线程
+            if (result) {
+                return result;
+            }
+            result = mReaderThread->run("InputReader", PRIORITY_URGENT_DISPLAY);                 //启动(7)中创建的Reader线程
+            if (result) {
+                mDispatcherThread->requestExit();
+                return result;
+            }
+            return OK;
+        }
+    至此, IMS启动完成.
+    
+    
+16.1.2 EventHub的作用-把消息统一格式
+  一台移动设备能产生输入消息的部件很多, 包括键盘,触摸屏,按键等, EventHub的作用就是把所有这些设备产生的消息统一成一种格式, 再发往上层进行处理.
+     
+  (1)EventHub构造函数代码如下:
+        EventHub::EventHub(void) :
+                mBuiltInKeyboardId(NO_BUILT_IN_KEYBOARD), mNextDeviceId(1), mControllerNumbers(),
+                mOpeningDevices(0), mClosingDevices(0),
+                mNeedToSendFinishedDeviceScan(false),
+                mNeedToReopenDevices(false), mNeedToScanDevices(true),
+                mPendingEventCount(0), mPendingEventIndex(0), mPendingINotify(false) {
+            acquire_wake_lock(PARTIAL_WAKE_LOCK, WAKE_LOCK_ID);
+            mEpollFd = epoll_create(EPOLL_SIZE_HINT);                                       //创建一个epoll句柄
+            mINotifyFd = inotify_init();                                                    //创建一个inotify句柄
+            int result = inotify_add_watch(mINotifyFd, DEVICE_PATH, IN_DELETE | IN_CREATE); //监视"/dev/input"目录的变化
+            struct epoll_event eventItem;
+            memset(&eventItem, 0, sizeof(eventItem));
+            eventItem.events = EPOLLIN;
+            eventItem.data.u32 = EPOLL_ID_INOTIFY;
+            result = epoll_ctl(mEpollFd, EPOLL_CTL_ADD, mINotifyFd, &eventItem);            //把inotify的句柄加入到epoll的监测中
+            int wakeFds[2];
+            result = pipe(wakeFds);                                                         //创建匿名管道
+            mWakeReadPipeFd = wakeFds[0];
+            mWakeWritePipeFd = wakeFds[1];
+            result = fcntl(mWakeReadPipeFd, F_SETFL, O_NONBLOCK);                           //将管道读端设成非阻塞模式
+            result = fcntl(mWakeWritePipeFd, F_SETFL, O_NONBLOCK);                          //将管道写端设成非阻塞模式
+            eventItem.data.u32 = EPOLL_ID_WAKE;
+            result = epoll_ctl(mEpollFd, EPOLL_CTL_ADD, mWakeReadPipeFd, &eventItem);       //将管道的读端加入到epoll的监测中
+            int major, minor;
+            getLinuxRelease(&major, &minor);
+            // EPOLLWAKEUP was introduced in kernel 3.5
+            mUsingEpollWakeup = major > 3 || (major == 3 && minor >= 5);
+        }
+        注意:
+            inotify是Linux中监视目录和文件变化的一种机制, 这里监视的目录是"/dev/input", 如果这个目录有变化, 就表明系统中有输入设备加入或移除了, 如外置的usb键盘.
+            在EventHub的构造函数中, 并没有和任何输入设备关联.
+  (2)EventHub 中 getEvents()函数代码如下:
+        size_t EventHub::getEvents(int timeoutMillis, RawEvent* buffer, size_t bufferSize) {
+            ALOG_ASSERT(bufferSize >= 1);
+            AutoMutex _l(mLock);
+            struct input_event readBuffer[bufferSize];
+            RawEvent* event = buffer;
+            size_t capacity = bufferSize;
+            bool awoken = false;
+            for (;;) {
+                nsecs_t now = systemTime(SYSTEM_TIME_MONOTONIC);
+                if (mNeedToReopenDevices) {     // Reopen input devices if needed.
+                    mNeedToReopenDevices = false;
+                    closeAllDevicesLocked();
+                    mNeedToScanDevices = true;
+                    break;                      // return to the caller before we actually rescan
+                }
+                while (mClosingDevices) {       // Report any devices that had last been added/removed.
+                    Device* device = mClosingDevices;
+                    mClosingDevices = device->next;
+                    event->when = now;
+                    event->deviceId = device->id == mBuiltInKeyboardId ? BUILT_IN_KEYBOARD_ID : device->id;
+                    event->type = DEVICE_REMOVED;
+                    event += 1;
+                    delete device;
+                    mNeedToSendFinishedDeviceScan = true;
+                    if (--capacity == 0) {
+                        break;
+                    }
+                }
+                if (mNeedToScanDevices) {
+                    mNeedToScanDevices = false;
+                    scanDevicesLocked();        //此函数将调用
+                    mNeedToSendFinishedDeviceScan = true;
+                }
+             }
+             //.......
+             if (eventItem.events & EPOLLIN) {                                                          //epoll监测到有输入
+                int32_t readSize = read(device->fd, readBuffer, sizeof(struct input_event) * capacity); //读取设备的数据
+             } else if (eventItem.events & EPOLLHUP) {                                                  //epoll hang-up event
+             } else {                                                                                   //unexpected epoll event
+             }
+             //......
+             int pollResult = epoll_wait(mEpollFd, mPendingEventItems, EPOLL_MAX_EVENTS, timeoutMillis);//调用epoll_wait等待数据
+         }
+        注意: 如果是第一次调用该函数, 将调用scanDevicesLocked()函数
+  (3)EventHub 中 scanDevicesLocked()函数代码如下:
+    void EventHub::scanDevicesLocked() {
+        status_t res = scanDirLocked(DEVICE_PATH);  //扫描"/dev/input"目录
+        if (mDevices.indexOfKey(VIRTUAL_KEYBOARD_ID) < 0) {
+            createVirtualKeyboardLocked();
+        }
+    }
+  (4)EventHub 中 scanDirLocked()函数代码如下:
+    status_t EventHub::scanDirLocked(const char *dirname){
+        char devname[PATH_MAX];
+        char *filename;
+        DIR *dir;
+        struct dirent *de;
+        dir = opendir(dirname);
+        if(dir == NULL)
+            return -1;
+        strcpy(devname, dirname);
+        filename = devname + strlen(devname);
+        *filename++ = '/';
+        while((de = readdir(dir))) {
+            if(de->d_name[0] == '.' &&
+               (de->d_name[1] == '\0' ||
+                (de->d_name[1] == '.' && de->d_name[2] == '\0')))
+                continue;
+            strcpy(filename, de->d_name);
+            openDeviceLocked(devname);  //打开"/dev/input"目录后, 对目录下的每个文件都调用openDeviceLocked()函数
+        }
+        closedir(dir);
+        return 0;
+    }
+  (5)EventHub 中 openDeviceLocked()函数代码如下:
+    status_t EventHub::openDeviceLocked(const char *devicePath) {
+        char buffer[80];
+        int fd = open(devicePath, O_RDWR | O_CLOEXEC | O_NONBLOCK);                 //打开设备
+        InputDeviceIdentifier identifier;
+        if(ioctl(fd, EVIOCGNAME(sizeof(buffer) - 1), &buffer) < 1) {                //获取设备信息
+        if(ioctl(fd, EVIOCGVERSION, &driverVersion)) {
+        if(ioctl(fd, EVIOCGID, &inputId)) {
+        identifier.bus = inputId.bustype;
+        identifier.product = inputId.product;
+        identifier.vendor = inputId.vendor;
+        identifier.version = inputId.version;
+        if(ioctl(fd, EVIOCGPHYS(sizeof(buffer) - 1), &buffer) < 1) {
+        if(ioctl(fd, EVIOCGUNIQ(sizeof(buffer) - 1), &buffer) < 1) {
+        assignDescriptorLocked(identifier);
+        int32_t deviceId = mNextDeviceId++;
+        Device* device = new Device(fd, deviceId, String8(devicePath), identifier); //创建Devices对象
+        if (registerDeviceForEpollLocked(device) != OK) {                           //加入到epoll的监控中
+            delete device;
+            return -1;
+        }
+        configureFd(device);
+        addDeviceLocked(device);                                                    //加入到mDevices列表中
+    }
+  (6)手机上/dev/input目录下的内容如下:
+        $ adb shell
+        s2:/ # cd /dev/input
+        s2:/dev/input # ls
+        s2:/dev/input # ls -lsa
+            total 0
+            0 drwxr-xr-x  2 root root      260 2019-05-30 17:47 .
+            0 drwxr-xr-x 16 root root     3500 2019-05-30 17:47 ..
+            0 crw-rw----  1 root input 13,  64 1970-01-22 14:05 event0
+            0 crw-rw----  1 root input 13,  65 1970-01-22 14:05 event1
+            0 crw-rw----  1 root input 13,  66 1970-01-22 14:05 event2
+            0 crw-rw----  1 root input 13,  67 1970-01-22 14:05 event3
+            0 crw-rw----  1 root input 13,  68 1970-01-22 14:05 event4
+            0 crw-rw----  1 root input 13,  69 1970-01-22 14:05 event5
+            0 crw-rw----  1 root input 13,  70 2019-05-30 17:47 event6
+            0 crw-rw----  1 root input 13,  71 2019-05-30 17:47 event7
+            0 crw-rw----  1 root input 13,  63 1970-01-22 14:05 mice
+            0 crw-rw----  1 root input 13,  32 1970-01-22 14:05 mouse0
+            0 crw-rw----  1 root input 13,  33 1970-01-22 14:05 mouse1
+        注意:
+            /dev/input目录下的存放的不是设备,而是event文件,这些event文件对应的设备信息在文件/proc/bus/input/devices文件中查到
+    (7)手机上/proc/bus/input/devices文件的内容如下:
+        # cd /proc/bus/input
+        # ls
+        devices handlers 
+        # cat devices                                                                                                                                                                            
+        I: Bus=0000 Vendor=0000 Product=0003 Version=2061       //event0
+        N: Name="synaptics_dsx_s2"
+        P: Phys=synaptics_dsx/touch_input
+        S: Sysfs=/devices/soc.0/78b8000.i2c/i2c-4/4-004b/input/input0
+        U: Uniq=
+        H: Handlers=kgsl mouse0 event0 
+        B: PROP=2
+        B: EV=b
+        B: KEY=420 0 0 40008800 4000000000 0
+        B: ABS=263800000000003
+        I: Bus=0000 Vendor=0000 Product=0000 Version=0000       //event1
+        N: Name="input_mt_wrapper"
+        P: Phys=
+        S: Sysfs=/devices/virtual/input/input1
+        U: Uniq=
+        H: Handlers=kgsl event1 
+        B: PROP=0
+        B: EV=9
+        B: ABS=661000000000000
+        I: Bus=0000 Vendor=0000 Product=0000 Version=0000       //event2
+        N: Name="hbtp_vm"
+        P: Phys=
+        S: Sysfs=/devices/virtual/input/input2
+        U: Uniq=
+        H: Handlers=mouse1 event2 
+        B: PROP=2
+        B: EV=7
+        B: KEY=30000 0 0 0 0
+        B: REL=3
+        I: Bus=0000 Vendor=0000 Product=0000 Version=0000       //event3关联的是键盘
+        N: Name="qwerty"
+        P: Phys=
+        S: Sysfs=/devices/virtual/input/input3
+        U: Uniq=
+        H: Handlers=event3 
+        B: PROP=0
+        B: EV=3
+        B: KEY=f0000 0 0 100000 2000000040000800 1016c000000008 0
+        I: Bus=0000 Vendor=0000 Product=0000 Version=0000       //event4
+        N: Name="qpnp_pon"
+        P: Phys=qpnp_pon/input0
+        S: Sysfs=/devices/virtual/input/input4
+        U: Uniq=
+        H: Handlers=event4 
+        B: PROP=10
+        B: EV=3
+        B: KEY=14000000000000 0
+        I: Bus=0019 Vendor=0001 Product=0001 Version=0100       //event5关联的是手机的按键
+        N: Name="gpio-keys"
+        P: Phys=gpio-keys/input0
+        S: Sysfs=/devices/soc.0/gpio_keys.109/input/input5
+        U: Uniq=
+        H: Handlers=event5 
+        B: PROP=0
+        B: EV=3
+        B: KEY=8004000000000 0
+        I: Bus=0000 Vendor=0000 Product=0000 Version=0000       //event6
+        N: Name="msm8976-skun-snd-card Button Jack"
+        P: Phys=ALSA
+        S: Sysfs=/devices/soc.0/c051000.sound/sound/card0/input6
+        U: Uniq=
+        H: Handlers=event6 
+        B: PROP=10
+        B: EV=3
+        B: KEY=f8 400000000 0 c000000000000 0
+        I: Bus=0000 Vendor=0000 Product=0000 Version=0000       //event7关联的是耳机插孔
+        N: Name="msm8976-skun-snd-card Headset Jack"
+        P: Phys=ALSA
+        S: Sysfs=/devices/soc.0/c051000.sound/sound/card0/input7
+        U: Uniq=
+        H: Handlers=event7 
+        B: PROP=0
+        B: EV=21
+        B: SW=3c0d4
+                    
+
+
+16.1.3 读取RawEvent
+    (1)InputReader.cpp中loopOnce()函数代码如下:
+        void InputReader::loopOnce() {
+            int32_t oldGeneration;
+            int32_t timeoutMillis;
+            bool inputDevicesChanged = false;
+            Vector<InputDeviceInfo> inputDevices;
+            // 调用EventHub的getEvents()函数来读取Event, 将读到的Event保存在mEventBuffer中, 请看16.1.2中的(2)
+            size_t count = mEventHub->getEvents(timeoutMillis, mEventBuffer, EVENT_BUFFER_SIZE); 
+            {
+                if (count) {
+                    processEventsLocked(mEventBuffer, count);   //处理Event, 这些Event的类型是RawEvent
+                }
+            }
+            if (inputDevicesChanged) {
+                mPolicy->notifyInputDevicesChanged(inputDevices);
+            }
+            mQueuedListener->flush();
+        }
+        struct RawEvent {
+            nsecs_t when;       //产生时间
+            int32_t deviceId;   //设备id
+            int32_t type;       //类型
+            int32_t code;       //输入码
+            int32_t value;      //数据值
+        };
+
+16.1.4 处理RawEvent
+    (1)InputReader.cpp 中 processEventsLocked()函数代码如下:
+        void InputReader::processEventsLocked(const RawEvent* rawEvents, size_t count) {
+            for (const RawEvent* rawEvent = rawEvents; count;) {
+                int32_t type = rawEvent->type;
+                size_t batchSize = 1;
+                if (type < EventHubInterface::FIRST_SYNTHETIC_EVENT) {
+                    int32_t deviceId = rawEvent->deviceId;
+                    while (batchSize < count) {                 //把属于同一设备的RawEvent一起处理
+                        if (rawEvent[batchSize].type >= EventHubInterface::FIRST_SYNTHETIC_EVENT
+                                || rawEvent[batchSize].deviceId != deviceId) {
+                            break;
+                        }
+                        batchSize += 1;                         //设备号相同,batchSize加1
+                    }
+                    processEventsForDeviceLocked(deviceId, rawEvent, batchSize); //设备自身产生的Event, 例如键盘的按键Event
+                } else {
+                    switch (rawEvent->type) {                   //处理设备相关的Event
+                    case EventHubInterface::DEVICE_ADDED:       //增加设备
+                        addDeviceLocked(rawEvent->when, rawEvent->deviceId);
+                        break;
+                    case EventHubInterface::DEVICE_REMOVED:     //移除设备
+                        removeDeviceLocked(rawEvent->when, rawEvent->deviceId);
+                        break;
+                    case EventHubInterface::FINISHED_DEVICE_SCAN:   //扫描设备结束
+                        handleConfigurationChangedLocked(rawEvent->when);   //调用函数来处理设备的配置文件
+                        break;
+                    default:
+                        ALOG_ASSERT(false); // can't happen
+                        break;
+                    }
+                }
+                count -= batchSize;
+                rawEvent += batchSize;
+            }
+        }
+    (2)InputReader.cpp 中 processEventsForDeviceLocked()函数代码如下:
+        void InputReader::processEventsForDeviceLocked(int32_t deviceId,
+                const RawEvent* rawEvents, size_t count) {
+            ssize_t deviceIndex = mDevices.indexOfKey(deviceId);
+            if (deviceIndex < 0) {
+                return;
+            }
+            InputDevice* device = mDevices.valueAt(deviceIndex);
+            if (device->isIgnored()) {
+                return;
+            }
+            device->process(rawEvents, count);  //
+        }
+    (3)InputDevice.cpp中processInput()函数代码如下:
+        void EvdevDevice::processInput(InputEvent& event, nsecs_t currentTime) {
+            //......
+            for (size_t i = 0; i < mMappers.size(); ++i) {
+                mMappers[i]->process(event);    //对每个RawEvent调用它的InputMapper对象的process()函数
+            }
+        }
+        注意:
+            InputMapper的子类: SwitchInputMapper 和 MouseInputMapper.
+            InputMapper类的作用是什么呢?
+            因为Input设备有很多种, 它们使用的消息格式各不相同, 这些InputMapper的用途就是对它们各自的RawEvent进行处理, 翻译成上层能识别的消息格式.
+    (8)SwitchInputMapper.cpp 中 process()函数代码如下:
+            void SwitchInputMapper::process(const InputEvent& event) {
+                switch (event.type) {
+                    case EV_SW:
+                        processSwitch(event.code, event.value);
+                        break;
+                    case EV_SYN:
+                        if (event.code == SYN_REPORT) {
+                            sync(event.when);
+                        }
+                        break;
+                    default:
+                        ALOGV("unknown switch event type: %d", event.type);
+                }
+            }
+    (4)MouseInputMapper.cpp 中 process()函数代码如下:
+        void MouseInputMapper::process(const InputEvent& event) {
+            switch (event.type) {
+                case EV_KEY:    //如果是按键消息
+                    processButton(event.code, event.value);
+                    break;
+                case EV_REL:
+                    processMotion(event.code, event.value);
+                    break;
+                case EV_SYN:
+                    if (event.code == SYN_REPORT) {
+                        sync(event.when);
+                    }
+                    break;
+                default:
+                    ALOGV("unknown mouse event type: %d", event.type);
+            }
+        }
+    (5)MouseInputMapper.cpp 中 sync()函数代码如下:
+        void MouseInputMapper::sync(nsecs_t when) {
+            if (mRelX != 0) {
+                getInputReport()->setIntUsage(INPUT_COLLECTION_ID_MOUSE, INPUT_USAGE_AXIS_X, mRelX, 0);
+            }
+            if (mRelY != 0) {
+                getInputReport()->setIntUsage(INPUT_COLLECTION_ID_MOUSE, INPUT_USAGE_AXIS_Y, mRelY, 0);
+            }
+            if (mRelWheel != 0) {
+                getInputReport()->setIntUsage(INPUT_COLLECTION_ID_MOUSE, INPUT_USAGE_AXIS_VSCROLL,
+                        mRelWheel, 0);
+            }
+            if (mRelHWheel != 0) {
+                getInputReport()->setIntUsage(INPUT_COLLECTION_ID_MOUSE, INPUT_USAGE_AXIS_HSCROLL,
+                        mRelHWheel, 0);
+            }
+            // Report and reset.
+            getInputReport()->reportEvent(getDeviceHandle()); //报告Event
+            mUpdatedButtonMask.clear();
+            mButtonValues.clear();
+            mRelX = 0;
+            mRelY = 0;
+            mRelWheel = 0;
+            mRelHWheel = 0;
+        }
+    (6)MouseInputMapper.cpp 中 reportEvent()函数代码如下:
+        void InputReport::reportEvent(InputDeviceHandle* d) {
+            mCallbacks.report_event(mHost, d, mReport);
+        }
+    (7)InputReader.cpp 中 getListener()函数代码如下:
+        InputListenerInterface* InputReader::ContextImpl::getListener() {
+            return mReader->mQueuedListener.get();  //这里获取的是创建InputReader时传入的InputDispatcher对象
+        }
+    (8)在InputReader.cpp 中有很多类似下面的调用:
+        getListener()->notifyKey(&args);
+        getListener()->notifyDeviceReset(&args);
+        getListener()->notifySwitch(&args);
+        getListener()->notifyMotion(&args);
+    (10)InputDispatcher.cpp 中notifyKey()函数代码如下:
+        void InputDispatcher::notifyKey(const NotifyKeyArgs* args) {
+            KeyEvent event;
+            // 创建KeyEvent对象
+            event.initialize(args->deviceId, args->source, args->action,
+                    flags, keyCode, args->scanCode, metaState, 0,
+                    args->downTime, args->eventTime);
+            bool needWake;
+            {
+                mLock.lock();
+                int32_t repeatCount = 0;
+                // 创建KeyEntry对象
+                KeyEntry* newEntry = new KeyEntry(args->eventTime,
+                        args->deviceId, args->source, policyFlags,
+                        args->action, flags, keyCode, args->scanCode,
+                        metaState,
+                        args->displayId,
+                        repeatCount, args->downTime);
+                // 把KeyEntry对象加入到mInboundQueue队列中
+                needWake = enqueueInboundEventLocked(newEntry);
+                mLock.unlock();
+            }
+            if (needWake) {
+                mLooper->wake(); //调用mLooper的wake唤醒线程
+            }
+        }
+    (10)InputDispatcher.cpp enqueueInboundEventLocked()函数代码如下:
+        bool InputDispatcher::enqueueInboundEventLocked(EventEntry* entry) {
+            bool needWake = mInboundQueue.isEmpty();
+            mInboundQueue.enqueueAtTail(entry); //将entry加入到队列中
+        }
+    (9)在InputDispatcher.h 中有很多类似下面的实体类:
+        struct Link {
+        struct InjectionState {
+        struct EventEntry : Link<EventEntry> {
+        struct ConfigurationChangedEntry : EventEntry {
+        struct DeviceResetEntry : EventEntry {
+        struct KeyEntry : EventEntry {
+        struct MotionEntry : EventEntry {
+        struct DispatchEntry : Link<DispatchEntry> {
+        struct CommandEntry;
+        struct CommandEntry : Link<CommandEntry> {
+        
+16.1.5 分发输入消息
+    主要分析InputManager.cpp中创建的InputDispatcherThread线程
+    class InputDispatcherThread : public Thread {
+    (1)InputDispatcher.cpp 中threadLoop()函数代码如下:
+        bool InputDispatcherThread::threadLoop() {
+            mDispatcher->dispatchOnce();
+            return true;
+        }
+    (2)InputDispatcher.cpp 中dispatchOnce()函数代码如下:
+        void InputDispatcher::dispatchOnce() {
+            nsecs_t nextWakeupTime = LONG_LONG_MAX;
+            {
+                AutoMutex _l(mLock);
+                mDispatcherIsAliveCondition.broadcast();
+                if (!haveCommandsLocked()) {                    //如果mCommandQueue队列不为空
+                    dispatchOnceInnerLocked(&nextWakeupTime);   //分发消息
+                }
+                if (runCommandsLockedInterruptible()) {
+                    nextWakeupTime = LONG_LONG_MIN;
+                }
+            }
+            int timeoutMillis = toMillisecondTimeoutDelay(currentTime, nextWakeupTime);
+            mLooper->pollOnce(timeoutMillis);
+        }
+    void InputDispatcher::dispatchOnceInnerLocked(nsecs_t* nextWakeupTime) {
+        mPendingEvent = mInboundQueue.dequeueAtHead();  //从队列中取出消息
+        switch (mPendingEvent->type) {
+            case EventEntry::TYPE_KEY: {
+                KeyEntry* typedEntry = static_cast<KeyEntry*>(mPendingEvent);
+                if (isAppSwitchDue) {
+                    if (isAppSwitchKeyEventLocked(typedEntry)) {
+                        resetPendingAppSwitchLocked(true);
+                        isAppSwitchDue = false;
+                    } else if (dropReason == DROP_REASON_NOT_DROPPED) {
+                        dropReason = DROP_REASON_APP_SWITCH;
+                    }
+                }
+                if (dropReason == DROP_REASON_NOT_DROPPED
+                        && isStaleEventLocked(currentTime, typedEntry)) {
+                    dropReason = DROP_REASON_STALE;
+                }
+                if (dropReason == DROP_REASON_NOT_DROPPED && mNextUnblockedEvent) {
+                    dropReason = DROP_REASON_BLOCKED;
+                }
+                done = dispatchKeyLocked(currentTime, typedEntry, &dropReason, nextWakeupTime); //KeyEvent调用dispatchKeyLocked() 继续处理
+                break;
+            }
+        }
+    }
+    dispatchKeyLocked() -> dispatchEventLocked() -> prepareDispatchCycleLocked() -> enqueueDispatchEntriesLocked() -> startDispatchCycleLocked()
+    (2)InputDispatcher.cpp 中startDispatchCycleLocked()函数代码如下:
+        void InputDispatcher::startDispatchCycleLocked(nsecs_t currentTime, const sp<Connection>& connection) {
+            while (connection->status == Connection::STATUS_NORMAL && !connection->outboundQueue.isEmpty()) {
+                DispatchEntry* dispatchEntry = connection->outboundQueue.head;
+                dispatchEntry->deliveryTime = currentTime;
+                status_t status;
+                EventEntry* eventEntry = dispatchEntry->eventEntry;
+                switch (eventEntry->type) {
+                case EventEntry::TYPE_KEY: {
+                    KeyEntry* keyEntry = static_cast<KeyEntry*>(eventEntry);
+                    // 此connection对象其实是和当前有焦点的窗口关联的对象
+                    status = connection->inputPublisher.publishKeyEvent(dispatchEntry->seq,
+                            keyEntry->deviceId, keyEntry->source,
+                            dispatchEntry->resolvedAction, dispatchEntry->resolvedFlags,
+                            keyEntry->keyCode, keyEntry->scanCode,
+                            keyEntry->metaState, keyEntry->repeatCount, keyEntry->downTime,
+                            keyEntry->eventTime);
+                    break;
+                }
+            }
+        }
+        注意:
+            // IMS的registerInputChannel() -> nativeRegisterInputChannel() -> 
+            // com_android_server_input_InputManagerService.cpp中NativeInputManager的registerInputChannel() ->
+            // InputDispatcher.cpp中的registerInputChannel()函数
+        status_t InputDispatcher::registerInputChannel(const sp<InputChannel>& inputChannel,
+                const sp<InputWindowHandle>& inputWindowHandle, bool monitor) {
+            {
+                AutoMutex _l(mLock);
+                if (getConnectionIndexLocked(inputChannel) >= 0) {
+                    return BAD_VALUE;
+                }
+                sp<Connection> connection = new Connection(inputChannel, inputWindowHandle, monitor); //创建Connection对象,传入参数inputChannel
+                int fd = inputChannel->getFd();
+                mConnectionsByFd.add(fd, connection); //添加到mConnectionsByFd列表中
+                if (monitor) {
+                    mMonitoringChannels.push(inputChannel);
+                }
+                mLooper->addFd(fd, 0, ALOOPER_EVENT_INPUT, handleReceiveCallback, this);
+            }
+            mLooper->wake();
+            return OK;
+        }
+        ssize_t InputDispatcher::getConnectionIndexLocked(const sp<InputChannel>& inputChannel) {
+            ssize_t connectionIndex = mConnectionsByFd.indexOfKey(inputChannel->getFd()); //查找inputChannel对应的Connection对象的index
+            if (connectionIndex >= 0) {
+                sp<Connection> connection = mConnectionsByFd.valueAt(connectionIndex);
+                if (connection->inputChannel.get() == inputChannel.get()) {
+                    return connectionIndex;
+                }
+            }
+            return -1;
+        }
+        status_t InputPublisher::publishKeyEvent(
+                uint32_t seq,
+                int32_t deviceId,
+                int32_t source,
+                int32_t action,
+                int32_t flags,
+                int32_t keyCode,
+                int32_t scanCode,
+                int32_t metaState,
+                int32_t repeatCount,
+                nsecs_t downTime,
+                nsecs_t eventTime) {
+            InputMessage msg;
+            msg.header.type = InputMessage::TYPE_KEY;
+            msg.body.key.seq = seq;
+            msg.body.key.deviceId = deviceId;
+            msg.body.key.source = source;
+            msg.body.key.action = action;
+            msg.body.key.flags = flags;
+            msg.body.key.keyCode = keyCode;
+            msg.body.key.scanCode = scanCode;
+            msg.body.key.metaState = metaState;
+            msg.body.key.repeatCount = repeatCount;
+            msg.body.key.downTime = downTime;
+            msg.body.key.eventTime = eventTime;
+            return mChannel->sendMessage(&msg); 
+            //此处的inputChannel是创建Connection对象,传入的参数inputChannel
+            //inputChannel的创建流程IMS中nativeRegisterInputChannel()函数->android_view_InputChannel.cpp中android_view_InputChannel_nativeOpenInputChannelPair()函数 -> NativeInputChannel对象的指针保存在java层的InputChannel对象的mPtr中.
+        }
+
+
+
+16.2 应用进程处理Input消息
+16.2.1 理解InputChannel
+    下面看Android应用的框架层是如何接收和处理Input消息的.
+    ViewRootImpl的setView()函数代码如下:
+        public void setView(View view, WindowManager.LayoutParams attrs, View panelParentView) {
+            synchronized (this) {
+                if ((mWindowAttributes.inputFeatures & WindowManager.LayoutParams.INPUT_FEATURE_NO_INPUT_CHANNEL) == 0) {
+                    mInputChannel = new InputChannel();     //如果Window的属性能接收输入并且还没有创建InputChannel, 则创建一个新的InputChannel对象
+                }
+                mForceDecorViewVisibility = (mWindowAttributes.privateFlags & PRIVATE_FLAG_FORCE_DECOR_VIEW_VISIBILITY) != 0;
+                try {
+                    mOrigWindowType = mWindowAttributes.type;
+                    mAttachInfo.mRecomputeGlobalAttributes = true;
+                    collectViewAttributes();
+                    res = mWindowSession.addToDisplay(mWindow, mSeq, mWindowAttributes, // mInputChannel 通过 addToDisplay()方法传递到WMS中, 最后会调用WMS的 addWindow() 方法
+                            getHostVisibility(), mDisplay.getDisplayId(), mWinFrame,
+                            mAttachInfo.mContentInsets, mAttachInfo.mStableInsets,
+                            mAttachInfo.mOutsets, mAttachInfo.mDisplayCutout, mInputChannel);
+                }
+                if (view instanceof RootViewSurfaceTaker) {
+                        mInputQueueCallback = ((RootViewSurfaceTaker)view).willYouTakeTheInputQueue();
+                }
+                if (mInputChannel != null) {
+                    if (mInputQueueCallback != null) {
+                        mInputQueue = new InputQueue();
+                        mInputQueueCallback.onInputQueueCreated(mInputQueue);
+                    }
+                    mInputEventReceiver = new WindowInputEventReceiver(mInputChannel, Looper.myLooper());   //WindowInputEventReceiver
+                }
+                CharSequence counterSuffix = attrs.getTitle(); //建立处理输入消息的管道线, InputStage
+                mSyntheticInputStage = new SyntheticInputStage();
+                InputStage viewPostImeStage = new ViewPostImeInputStage(mSyntheticInputStage);
+                InputStage nativePostImeStage = new NativePostImeInputStage(viewPostImeStage, "aq:native-post-ime:" + counterSuffix);
+                InputStage earlyPostImeStage = new EarlyPostImeInputStage(nativePostImeStage);
+                InputStage imeStage = new ImeInputStage(earlyPostImeStage, "aq:ime:" + counterSuffix);
+                InputStage viewPreImeStage = new ViewPreImeInputStage(imeStage);
+                InputStage nativePreImeStage = new NativePreImeInputStage(viewPreImeStage, "aq:native-pre-ime:" + counterSuffix);
+                mFirstInputStage = nativePreImeStage;
+                mFirstPostImeInputStage = earlyPostImeStage;
+                mPendingInputEventQueueLengthCounterName = "aq:pending:" + counterSuffix;
+            }
+16.2.2 接收Input消息
+    最后通过CallVoidMethod()来调用java层的WindowInputEventReceiver对象的dispatchInputEvent()方法, dispatchInputEvent()又调用了onInputEvent()方法.
+    来自底层硬件的Event经过"长途跋涉"终于到达应用中拥有焦点的Activity的ViewRootImpl对象.
+
+16.2.3 理解InputStage
+
+16.2.4 流水线处理 Input 消息
+
+
+
+    
 系统输入事件及分发详解
 https://www.cnblogs.com/xdlltao/p/5833253.html
 
-
-Android的input事件输入系统
+输入事件InputEvent分为KeyEvent和MotionEvent, 三者的继承关系如下:
+    Object -> InputEvent               //输入事件的公共基类
+                        -> KeyEvent    //用于报告键盘和按钮点击事件
+                        -> MotionEvent //用于报告移动(鼠标,笔,手指,轨迹球)事件, 运动事件可能持有相对或者绝对的移动和其它数据,依赖于设备的类型
 
 输入事件是计算机设备接收到的输入信息  
-Object -> InputEvent                //输入事件的公共基类
-                     -> KeyEvent    //用于报告键盘和按钮点击事件
-                     -> MotionEvent //用于报告移动(鼠标,笔,手指,轨迹球)事件, 运动事件可能持有相对或者绝对的移动和其它数据,依赖于设备的类型
+
 这3个类的定义如下:
     public abstract class InputEvent implements Parcelable {
     public class KeyEvent extends InputEvent implements Parcelable {

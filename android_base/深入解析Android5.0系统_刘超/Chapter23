@@ -1,9 +1,17 @@
-第23章 系统升级模块 - Android的Recovery模块
+第23章 系统升级模块 - Android 的 Recovery 模块
 
 
 Recovery是Android用来执行系统升级的模块. Android原生的Recovery容易理解,第三方的Recovery使用方便且流行.
 
-
+/bootable/recovery/etc/init.rc
+/bootable/recovery/recovery-persist.rc
+/bootable/recovery/recovery-refresh.rc
+/bootable/recovery/recovery.cpp
+/bootable/recovery/updater/updater.cpp
+/bootable/recovery/updater/install.cpp
+/bootable/recovery/update_verifier/update_verifier.rc
+bootable/recovery/update_verifier/update_verifier_main.cpp
+/bootable/recovery/update_verifier/update_verifier.cpp
 
 23.1 Recovery模块的执行
   安卓设备启动时会根据检测到的按键组合来决定是否进入Recovery模式.
@@ -28,8 +36,237 @@ Recovery是Android用来执行系统升级的模块. Android原生的Recovery容
 
 
 
-  23.1.1 Recovery模块的启动
-    Recovery模块的源码位于bootable/recovery, 入口函数main()位于在文件bootable/recovery/recovery.cpp
+23.1.1 Recovery模块的启动
+    Recovery模块的源码位于 bootable/recovery, 入口 main() 函数在 /bootable/recovery/recovery.cpp 文件的代码如下:
+        int main(int argc, char **argv) {
+          android::base::InitLogging(argv, &UiLogger);
+
+          static const char filter[] = "recovery/";
+          bool doRotate = false;
+          if (argc == 2 && strcmp(argv[1], "--adbd") == 0) {
+            minadbd_main();
+            return 0;
+          }
+          time_t start = time(nullptr);
+          redirect_stdio(TEMPORARY_LOG_FILE);
+
+          load_volume_table();
+          has_cache = volume_for_mount_point(CACHE_ROOT) != nullptr;
+
+          std::vector<std::string> args = get_args(argc, argv);
+          std::vector<char*> args_to_parse(args.size());
+          std::transform(args.cbegin(), args.cend(), args_to_parse.begin(),
+                         [](const std::string& arg) { return const_cast<char*>(arg.c_str()); });
+
+          const char* update_package = nullptr;
+          bool should_wipe_data = false;
+          bool should_prompt_and_wipe_data = false;
+          bool should_wipe_cache = false;
+          bool should_wipe_ab = false;
+          size_t wipe_package_size = 0;
+          bool show_text = false;
+          bool sideload = false;
+          bool sideload_auto_reboot = false;
+          bool just_exit = false;
+          bool shutdown_after = false;
+          int retry_count = 0;
+          bool security_update = false;
+
+          int arg;
+          int option_index;
+          while ((arg = getopt_long(args_to_parse.size(), args_to_parse.data(), "", OPTIONS, &option_index)) != -1) {
+            switch (arg) {
+              case 'n':
+                android::base::ParseInt(optarg, &retry_count, 0);
+                break;
+              case 'u':
+                update_package = optarg;
+                break;
+              case 'w':
+                should_wipe_data = true;
+                break;
+              case 'c':
+                should_wipe_cache = true;
+                break;
+              case 't':
+                show_text = true;
+                break;
+              case 's':
+                sideload = true;
+                break;
+              case 'a':
+                sideload = true;
+                sideload_auto_reboot = true;
+                break;
+              case 'x':
+                just_exit = true;
+                break;
+              case 'l':
+                locale = optarg;
+                break;
+              case 'p':
+                shutdown_after = true;
+                break;
+              case 'r':
+                reason = optarg;
+                break;
+              case 'e':
+                security_update = true;
+                break;
+              case 0: {
+                std::string option = OPTIONS[option_index].name;
+                if (option == "wipe_ab") {
+                  should_wipe_ab = true;
+                } else if (option == "wipe_package_size") {
+                  android::base::ParseUint(optarg, &wipe_package_size);
+                } else if (option == "prompt_and_wipe_data") {
+                  should_prompt_and_wipe_data = true;
+                }
+                break;
+              }
+              case '?':
+                LOG(ERROR) << "Invalid command argument";
+                continue;
+            }
+          }
+          if (locale.empty()) {
+            if (has_cache) {
+              locale = load_locale_from_cache();
+            }
+
+            if (locale.empty()) {
+              locale = DEFAULT_LOCALE;
+            }
+          }
+          Device* device = make_device();
+          if (android::base::GetBoolProperty("ro.boot.quiescent", false)) {
+            ui = new StubRecoveryUI();
+          } else {
+            ui = device->GetUI();
+            if (!ui->Init(locale)) {
+              ui = new StubRecoveryUI();
+            }
+          }
+          ui->SetSystemUpdateText(security_update);
+          int st_cur, st_max;
+          if (!stage.empty() && sscanf(stage.c_str(), "%d/%d", &st_cur, &st_max) == 2) {
+            ui->SetStage(st_cur, st_max);
+          }
+          ui->SetBackground(RecoveryUI::NONE);
+          if (show_text) ui->ShowText(true);
+          sehandle = selinux_android_file_context_handle();
+          selinux_android_set_sehandle(sehandle);
+          if (!sehandle) {
+            ui->Print("Warning: No file_contexts\n");
+          }
+          device->StartRecovery();
+          property_list(print_property, nullptr);
+          int status = INSTALL_SUCCESS;
+          if (update_package != nullptr) {
+            modified_flash = true;
+
+            if (!is_battery_ok()) {
+              log_failure_code(kLowBattery, update_package);
+              status = INSTALL_SKIPPED;
+            } else if (bootreason_in_blacklist()) {
+              status = INSTALL_SKIPPED;
+            } else {
+              if (retry_count == 0) {
+                set_retry_bootloader_message(retry_count + 1, args);
+              }
+              status = install_package(update_package, &should_wipe_cache, TEMPORARY_INSTALL_FILE, true, retry_count);
+              if (status == INSTALL_SUCCESS && should_wipe_cache) {
+                wipe_cache(false, device);
+              }
+              if (status != INSTALL_SUCCESS) {
+                if (status == INSTALL_RETRY && retry_count < RETRY_LIMIT) {
+                  copy_logs();
+                  retry_count += 1;
+                  set_retry_bootloader_message(retry_count, args);
+                  if (!reboot("reboot,recovery")) {
+                  } else {
+                    while (true) {
+                      pause();
+                    }
+                  }
+                }
+                if (is_ro_debuggable()) {
+                  ui->ShowText(true);
+                }
+              }
+            }
+          } else if (should_wipe_data) {
+            if (!wipe_data(device)) {
+              status = INSTALL_ERROR;
+            }
+          } else if (should_prompt_and_wipe_data) {
+            ui->ShowText(true);
+            ui->SetBackground(RecoveryUI::ERROR);
+            if (!prompt_and_wipe_data(device)) {
+              status = INSTALL_ERROR;
+            }
+            ui->ShowText(false);
+          } else if (should_wipe_cache) {
+            if (!wipe_cache(false, device)) {
+              status = INSTALL_ERROR;
+            }
+          } else if (should_wipe_ab) {
+            if (!wipe_ab_device(wipe_package_size)) {
+              status = INSTALL_ERROR;
+            }
+          } else if (sideload) {
+            if (!sideload_auto_reboot) {
+              ui->ShowText(true);
+            }
+            status = apply_from_adb(&should_wipe_cache, TEMPORARY_INSTALL_FILE);
+            if (status == INSTALL_SUCCESS && should_wipe_cache) {
+              if (!wipe_cache(false, device)) {
+                status = INSTALL_ERROR;
+              }
+            }
+            if (sideload_auto_reboot) {
+            }
+          } else if (!just_exit) {
+            if (is_ro_debuggable()) {
+              ui->ShowText(true);
+            }
+            status = INSTALL_NONE;  // No command specified
+            ui->SetBackground(RecoveryUI::NO_COMMAND);
+          }
+          if (status == INSTALL_ERROR || status == INSTALL_CORRUPT) {
+            ui->SetBackground(RecoveryUI::ERROR);
+            if (!ui->IsTextVisible()) {
+              sleep(5);
+            }
+          }
+          Device::BuiltinAction after = shutdown_after ? Device::SHUTDOWN : Device::REBOOT;
+          // 1. If the recovery menu is visible, prompt and wait for commands.
+          // 2. If the state is INSTALL_NONE, wait for commands. (i.e. In user build, manually reboot into recovery to sideload a package.)
+          // 3. sideload_auto_reboot is an option only available in user-debug build, reboot the device without waiting.
+          // 4. In all other cases, reboot the device. Therefore, normal users will observe the device reboot after it shows the "error" screen for 5s.
+          if ((status == INSTALL_NONE && !sideload_auto_reboot) || ui->IsTextVisible()) {
+            Device::BuiltinAction temp = prompt_and_wait(device, status);
+            if (temp != Device::NO_ACTION) {
+              after = temp;
+            }
+          }
+          finish_recovery();
+          switch (after) {
+            case Device::SHUTDOWN:
+              android::base::SetProperty(ANDROID_RB_PROPERTY, "shutdown,");
+              break;
+            case Device::REBOOT_BOOTLOADER:
+              android::base::SetProperty(ANDROID_RB_PROPERTY, "reboot,bootloader");
+              break;
+            default:
+              reboot("reboot,");
+              break;
+          }
+          while (true) {
+            pause();
+          }
+          return EXIT_SUCCESS;
+        }
 
   23.1.2 如何传递启动参数
     Bootloader和Recovery模块以及主系统之间的通信是通过系统的misc分区来完成的.
@@ -61,10 +298,78 @@ Recovery是Android用来执行系统升级的模块. Android原生的Recovery容
 23.3 update-binary模块
     update-binary才是最后执行系统升级的模块, update-binary模块的源文件位于bootable/recovery/updater中, 这个目录下的Android.mk文件中指定的模块名是updater,
     update-binary是在制作更新包时指定的一个新文件名.
+    下面我们看看 update-binary 模块的执行流程.
     
-   23.3.1 update-binary的执行流程  main()函数
-   23.3.2 update-script的语法规则  update-binary支持的命令有33种,这些命令定义在在RegisterBuiltins()函数和RegisterInstallFunctions()函数中
+23.3.1 update-binary的执行流程
+    update-binary 模块的 main() 函数在 /bootable/recovery/updater/updater.cpp 文件中的代码如下:
+    下面看 Evaluate() 函数在 /bootable/recovery/edify/expr.cpp 文件中的代码如下:
+    下面看 Expr 结构体在 /bootable/recovery/edify/include/edify/expr.h 文件中的代码如下:
+    struct Expr {
+      Function fn;
+      std::string name;
+      std::vector<std::unique_ptr<Expr>> argv;
+      int start, end;
 
+      Expr(Function fn, const std::string& name, int start, int end) :
+        fn(fn),
+        name(name),
+        start(start),
+        end(end) {}
+    };
+
+
+23.3.2 update-script的语法规则
+    update-binary支持的命令有33种,这些命令定义在 RegisterBuiltins() 函数和 RegisterInstallFunctions()函数中
+    /bootable/recovery/edify/expr.cpp
+        void RegisterBuiltins() {
+            RegisterFunction("ifelse", IfElseFn);
+            RegisterFunction("abort", AbortFn);
+            RegisterFunction("assert", AssertFn);
+            RegisterFunction("concat", ConcatFn);
+            RegisterFunction("is_substring", SubstringFn);
+            RegisterFunction("stdout", StdoutFn);
+            RegisterFunction("sleep", SleepFn);
+
+            RegisterFunction("less_than_int", LessThanIntFn);
+            RegisterFunction("greater_than_int", GreaterThanIntFn);
+        }
+
+    /bootable/recovery/updater/install.cpp
+        void RegisterInstallFunctions() {
+          RegisterFunction("mount", MountFn);
+          RegisterFunction("is_mounted", IsMountedFn);
+          RegisterFunction("unmount", UnmountFn);
+          RegisterFunction("format", FormatFn);
+          RegisterFunction("show_progress", ShowProgressFn);
+          RegisterFunction("set_progress", SetProgressFn);
+          RegisterFunction("package_extract_file", PackageExtractFileFn);
+
+          RegisterFunction("getprop", GetPropFn);
+          RegisterFunction("file_getprop", FileGetPropFn);
+
+          RegisterFunction("apply_patch", ApplyPatchFn);
+          RegisterFunction("apply_patch_check", ApplyPatchCheckFn);
+          RegisterFunction("apply_patch_space", ApplyPatchSpaceFn);
+
+          RegisterFunction("wipe_block_device", WipeBlockDeviceFn);
+
+          RegisterFunction("read_file", ReadFileFn);
+          RegisterFunction("sha1_check", Sha1CheckFn);
+          RegisterFunction("write_value", WriteValueFn);
+
+          RegisterFunction("wipe_cache", WipeCacheFn);
+
+          RegisterFunction("ui_print", UIPrintFn);
+
+          RegisterFunction("run_program", RunProgramFn);
+
+          RegisterFunction("reboot_now", RebootNowFn);
+          RegisterFunction("get_stage", GetStageFn);
+          RegisterFunction("set_stage", SetStageFn);
+
+          RegisterFunction("enable_reboot", EnableRebootFn);
+          RegisterFunction("tune2fs", Tune2FsFn);
+        }
      
 
 

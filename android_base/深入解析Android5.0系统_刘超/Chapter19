@@ -1,31 +1,814 @@
-第19章 Android的网络管理框架
+第19章 Android 的网络管理框架
 
 
-.
+Android 的网络连接管理系统一直都由四个service组成:
+    ConnectivityService 主要提供数据连接管理服务, 负责管理 Mobile,WIFI,BT,Ethernet几大类网络连,同时提供VPN和Tethering服务。
+    NetworkPolicyManagerService 主要维护网络使用策略, 策略可以从一个策略文件读取（策略文件保存在系统目录下的netpolicy.xml 文件中, 也可以通过NetworkPolicyManager对外提供的设置策略接口setNetworkPolicies
+    NetworkManagementService
+    NetworkStatsService 主要提供查询网络传输统计信息
+    注:
+        这4个 service 共同配合完成网络连接和管理功能, 其中核心服务是 ConnectivityService.
+        NetworkPolicyManagerService 通过 NetworkPolicyManager 对外提供SDK接口.
+        ConnectivityService 通过 ConnectivityManager 对外提供SDK接口
+
+
+下面是简易的结构关系图, 整体的框架图请参照network.jpeg:
+             UEvent                socket                                                              NetworkPolicyManagerService
+    内核驱动 -------> C++层 netd <---------> Java层 NativeDaemonConnector <---> NetworkManagementService <--- ConnectivityService ---> NetworkStatsService
+
+
+涉及的主要源码路径
+/system/netd/server/netd.rc
+/system/netd/server/CommandListener.cpp
+/system/netd/server/CommandListener.h
+/system/netd/server/DnsProxyListener.cpp
+/system/netd/server/DnsProxyListener.h
+/system/netd/server/FwmarkServer.cpp
+/system/netd/server/FwmarkServer.h
+/system/netd/server/MDnsSdListener.cpp
+/system/netd/server/MDnsSdListener.h
+/system/netd/server/NetdCommand.cpp
+/system/netd/server/NetdCommand.h
+/system/netd/server/NetdConstants.cpp
+/system/netd/server/NetdConstants.h
+/system/netd/server/NetdHwService.cpp
+/system/netd/server/NetdHwService.h
+/system/netd/server/NetdNativeService.cpp
+/system/netd/server/NetdNativeService.h
+/system/netd/server/NetlinkCommands.cpp
+/system/netd/server/NetlinkCommands.h
+/system/netd/server/NetlinkHandler.cpp
+/system/netd/server/NetlinkHandler.h
+/system/netd/server/NetlinkListener.cpp
+/system/netd/server/NetlinkListener.h
+/system/netd/server/NetlinkManager.cpp
+/system/netd/server/NetlinkManager.h
+/system/netd/server/Network.cpp
+/system/netd/server/Network.h
+/system/netd/server/NetworkController.cpp
+/system/netd/server/NetworkController.h
 
 
 
 
+19.1 管理各种网络设备 - netd 守护进程
+    netd 的全称是 network daemon, netd 是一个守护进程, 主要作用是管理各种网络设备.
+    通过 init 进程启动, 它在 /system/netd/server/netd.rc 中的服务定义如下:
+        service netd /system/bin/netd
+            class main
+            socket netd stream 0660 root system
+            socket dnsproxyd stream 0660 root inet
+            socket mdns stream 0660 root system
+            socket fwmarkd stream 0660 root inet
+            onrestart restart zygote
+            onrestart restart zygote_secondary
 
 
 
+19.1.1 netd 的架构
+    netd 的入口函数 main() 在 /system/netd/server/main.cpp 文件中的代码如下:
+        static void remove_pid_file();
+        static bool write_pid_file();
+
+        const char* const PID_FILE_PATH = "/data/misc/net/netd_pid";
+        const int PID_FILE_FLAGS = O_CREAT | O_TRUNC | O_WRONLY | O_NOFOLLOW | O_CLOEXEC;
+        const mode_t PID_FILE_MODE = S_IRUSR | S_IWUSR | S_IRGRP | S_IROTH;  // mode 0644, rw-r--r--
+
+        android::RWLock android::net::gBigNetdLock;
+
+        int main() {
+            using android::net::gCtls;
+            Stopwatch s;
+
+            ALOGI("Netd 1.0 starting");
+            remove_pid_file();
+
+            blockSigpipe();
+
+            for (const auto& sock : { CommandListener::SOCKET_NAME,
+                                      DnsProxyListener::SOCKET_NAME,
+                                      FwmarkServer::SOCKET_NAME,
+                                      MDnsSdListener::SOCKET_NAME }) {
+                setCloseOnExec(sock);
+            }
+
+            NetlinkManager *nm = NetlinkManager::Instance();    // 注意此处创建 NetlinkManager
+            if (nm == nullptr) {
+                exit(1);
+            };
+
+            gCtls = new android::net::Controllers();
+            gCtls->init();
+
+            CommandListener cl;     // 注意调用 NetlinkManager 对象的setBroadcaster()
+            nm->setBroadcaster((SocketListener *) &cl);
+
+            if (nm->start()) {      // 注意调用 NetlinkManager 对象的 start()
+                exit(1);
+            }
+
+            std::unique_ptr<NFLogListener> logListener;
+            {
+                auto result = makeNFLogListener();
+                if (!isOk(result)) {
+                    exit(1);
+                }
+                logListener = std::move(result.value());
+                auto status = gCtls->wakeupCtrl.init(logListener.get());
+                if (!isOk(result)) {
+                }
+            }
+
+            // 注意, 这里设置了一个环境变量 ANDROID_DNS_MODE,  Set local DNS mode, to prevent bionic from proxying back to this service, recursively.
+            setenv("ANDROID_DNS_MODE", "local", 1);
+            DnsProxyListener dpl(&gCtls->netCtrl, &gCtls->eventReporter);
+            if (dpl.startListener()) {
+                exit(1);
+            }
+
+            MDnsSdListener mdnsl;
+            if (mdnsl.startListener()) {
+                exit(1);
+            }
+
+            FwmarkServer fwmarkServer(&gCtls->netCtrl, &gCtls->eventReporter, &gCtls->trafficCtrl);
+            if (fwmarkServer.startListener()) {
+                exit(1);
+            }
+
+            Stopwatch subTime;
+            status_t ret;
+            if ((ret = NetdNativeService::start()) != android::OK) {
+                exit(1);
+            }
+
+            /*
+             * Now that we're up, we can respond to commands. Starting the listener also tells
+             * NetworkManagementService that we are up and that our binder interface is ready.
+             */
+            if (cl.startListener()) {
+                ALOGE("Unable to start CommandListener (%s)", strerror(errno));
+                exit(1);
+            }
+
+            write_pid_file();
+
+            // Now that netd is ready to process commands, advertise service availability for HAL clients.
+            NetdHwService mHwSvc;
+            if ((ret = mHwSvc.start()) != android::OK) {
+                ALOGE("Unable to start NetdHwService: %d", ret);
+                exit(1);
+            }
+
+            IPCThreadState::self()->joinThreadPool();
+
+            ALOGI("Netd exiting");
+
+            remove_pid_file();
+
+            exit(0);
+        }
+
+        static bool write_pid_file() {
+            char pid_buf[INT32_STRLEN];
+            snprintf(pid_buf, sizeof(pid_buf), "%d\n", (int) getpid());
+
+            int fd = open(PID_FILE_PATH, PID_FILE_FLAGS, PID_FILE_MODE);
+            if (fd == -1) {
+                ALOGE("Unable to create pid file (%s)", strerror(errno));
+                return false;
+            }
+
+            // File creation is affected by umask, so make sure the right mode bits are set.
+            if (fchmod(fd, PID_FILE_MODE) == -1) {
+                ALOGE("failed to set mode 0%o on %s (%s)", PID_FILE_MODE, PID_FILE_PATH, strerror(errno));
+                close(fd);
+                remove_pid_file();
+                return false;
+            }
+
+            if (write(fd, pid_buf, strlen(pid_buf)) != (ssize_t)strlen(pid_buf)) {
+                ALOGE("Unable to write to pid file (%s)", strerror(errno));
+                close(fd);
+                remove_pid_file();
+                return false;
+            }
+            close(fd);
+            return true;
+        }
+        static void remove_pid_file() {
+            unlink(PID_FILE_PATH);
+        }
+        注:
+            netd 的架构和 vold 的架构几乎是一样的, 都是通过 NetlinkManager 来监听内核的 Netlink Socket, 然后读取内核发出的 uevent, 这些 uevent 最后会在 NetlinkHandler 对象的 onEvent() 函数中得到处理.
+            本节将不再关注 NetlinkManager 和 SocketListener 等框架的代码, 只分析和功能相关部分.
+
+    在 netd.rc 中声明了四个socket, 因此, main() 函数中创建了四个 SocketListener 对象: CommandListener, DnsProxyListener, MDnsSdListener, FwmarkServer.
+    分别用来监听这四个socket, 并调用了它们的 startListener() 函数来启动监听.
+
+    在 18.1.2 中已经有总结这些类的继承关系, 这些类的继承关系如下:
+        SocketListener  ->  NetlinkListener     ->  NetlinkHandler
+                        ->  FrameworkListener   ->  CommandListener
+                                                    DnsProxyListener
+                                                    MDnsSdListener
+                        ->  FwmarkServer | StatsSocketListener | LogReader | LogAudit | LogListener | LogKlog
+
+
+19.1.2 处理 net 类型的 uevent
+    从内核发过来的 uevent 最终会在 NetlinkHandler 的 onEvent()函数中处理, 这些 uevent 是内核监测到硬件或驱动发生了变化后发出的.
+
+    下面看 onEvent() 函数在 /system/netd/server/NetlinkHandler.cpp 文件中的代码如下:
+        void NetlinkHandler::onEvent(NetlinkEvent *evt) {
+            const char *subsys = evt->getSubsystem();
+            if (!subsys) {
+                return;
+            }
+
+            if (!strcmp(subsys, "net")) {
+                NetlinkEvent::Action action = evt->getAction(); // NetlinkEvent
+                const char *iface = evt->findParam("INTERFACE");
+                if ((action == NetlinkEvent::Action::kAdd) ||
+                    (action == NetlinkEvent::Action::kLinkUp) ||
+                    (action == NetlinkEvent::Action::kLinkDown)) {
+                    const char *ifIndex = evt->findParam("IFINDEX");
+                    long ifaceIndex = parseIfIndex(ifIndex);
+                    if (ifaceIndex) {
+                        gCtls->trafficCtrl.addInterface(iface, ifaceIndex);
+                    } else {
+                        ALOGE("invalid interface index: %s(%s)", iface, ifIndex);
+                    }
+                }
+
+                if (action == NetlinkEvent::Action::kAdd) {
+                    notifyInterfaceAdded(iface);
+                } else if (action == NetlinkEvent::Action::kRemove) {
+                    notifyInterfaceRemoved(iface);
+                } else if (action == NetlinkEvent::Action::kChange) {
+                    evt->dump();
+                    notifyInterfaceChanged("nana", true);
+                } else if (action == NetlinkEvent::Action::kLinkUp) {
+                    notifyInterfaceLinkChanged(iface, true);
+                } else if (action == NetlinkEvent::Action::kLinkDown) {
+                    notifyInterfaceLinkChanged(iface, false);
+                } else if (action == NetlinkEvent::Action::kAddressUpdated || action == NetlinkEvent::Action::kAddressRemoved) {
+                    const char *address = evt->findParam("ADDRESS");
+                    const char *flags = evt->findParam("FLAGS");
+                    const char *scope = evt->findParam("SCOPE");
+                    const char *ifIndex = evt->findParam("IFINDEX");
+                    char addrstr[INET6_ADDRSTRLEN + strlen("/128")];
+                    strlcpy(addrstr, address, sizeof(addrstr));
+                    char *slash = strchr(addrstr, '/');
+                    if (slash) {
+                        *slash = '\0';
+                    }
+
+                    long ifaceIndex = parseIfIndex(ifIndex);
+                    if (!ifaceIndex) {
+                        ALOGE("invalid interface index: %s(%s)", iface, ifIndex);
+                    }
+                    if (action == NetlinkEvent::Action::kAddressUpdated) {
+                        gCtls->netCtrl.addInterfaceAddress(ifaceIndex, address);
+                    } else {  // action == NetlinkEvent::Action::kAddressRemoved
+                        bool shouldDestroy = gCtls->netCtrl.removeInterfaceAddress(ifaceIndex, address);
+                        if (shouldDestroy) {
+                            SockDiag sd;
+                            if (sd.open()) {
+                                int ret = sd.destroySockets(addrstr);
+                                if (ret < 0) {
+                                    ALOGE("Error destroying sockets: %s", strerror(-ret));
+                                }
+                            } else {
+                                ALOGE("Error opening NETLINK_SOCK_DIAG socket: %s", strerror(errno));
+                            }
+                        }
+                    }
+                    // Note: if this interface was deleted, iface is "" and we don't notify.
+                    if (iface && iface[0] && address && flags && scope) {
+                        notifyAddressChanged(action, address, iface, flags, scope);
+                    }
+                } else if (action == NetlinkEvent::Action::kRdnss) {
+                    const char *lifetime = evt->findParam("LIFETIME");
+                    const char *servers = evt->findParam("SERVERS");
+                    if (lifetime && servers) {
+                        notifyInterfaceDnsServers(iface, lifetime, servers);
+                    }
+                } else if (action == NetlinkEvent::Action::kRouteUpdated || action == NetlinkEvent::Action::kRouteRemoved) {
+                    const char *route = evt->findParam("ROUTE");
+                    const char *gateway = evt->findParam("GATEWAY");
+                    const char *iface = evt->findParam("INTERFACE");
+                    if (route && (gateway || iface)) {
+                        notifyRouteChange(action, route, gateway, iface);
+                    }
+                }
+
+            } else if (!strcmp(subsys, "qlog") || !strcmp(subsys, "xt_quota2")) {
+                const char *alertName = evt->findParam("ALERT_NAME");
+                const char *iface = evt->findParam("INTERFACE");
+                notifyQuotaLimitReached(alertName, iface);
+
+            } else if (!strcmp(subsys, "strict")) {
+                const char *uid = evt->findParam("UID");
+                const char *hex = evt->findParam("HEX");
+                notifyStrictCleartext(uid, hex);
+
+            } else if (!strcmp(subsys, "xt_idletimer")) {
+                const char *label = evt->findParam("INTERFACE");
+                const char *state = evt->findParam("STATE");
+                const char *timestamp = evt->findParam("TIME_NS");
+                const char *uid = evt->findParam("UID");
+                if (state)
+                    notifyInterfaceClassActivity(label, !strcmp("active", state), timestamp, uid);
+            }
+        }
+    下面看 notify() 函数在 /system/netd/server/NetlinkHandler.cpp 文件中的代码如下:
+        void NetlinkHandler::notify(int code, const char *format, ...) {
+            char *msg;
+            va_list args;
+            va_start(args, format);
+            if (vasprintf(&msg, format, args) >= 0) {
+                mNm->getBroadcaster()->sendBroadcast(code, msg, false); // mNm 是 NetlinkManager的对象
+                free(msg);
+            } else {
+                SLOGE("Failed to send notification: vasprintf: %s", strerror(errno));
+            }
+            va_end(args);
+        }
+    注:
+        函数中的各种 notify***() 函数只是调用 CommandListener 的接口向java层发送消息.
+        此函数中对 net 类型的 uevent 的处理只是发消息通知java层, 底层没有进行任何处理, 这里收到的消息有:
+            NetlinkEvent::Action::kUnknown = 0,
+            NetlinkEvent::Action::kAdd = 1,             // 系统中增加了一种网络 Interface
+            NetlinkEvent::Action::kRemove = 2,          // 系统中移除了一种网络 Interface
+            NetlinkEvent::Action::kChange = 3,          // 系统中某种网络 Interface 发生了变化
+            NetlinkEvent::Action::kLinkUp = 4,          // 系统中某个网络 Interface 建立了连接
+            NetlinkEvent::Action::kLinkDown = 5,        // 系统中某个网络 Interface 断开了连接
+            NetlinkEvent::Action::kAddressUpdated = 6,  // 系统中某个网络 Interface 的地址发生了变化
+            NetlinkEvent::Action::kAddressRemoved = 7,  // 系统中某个网络 Interface 的地址被移除了
+            NetlinkEvent::Action::kRdnss = 8,           //
+            NetlinkEvent::Action::kRouteUpdated = 9,    // 系统路由更新
+            NetlinkEvent::Action::kRouteRemoved = 10,   // 系统路由被移除
+        此外还有来自流量控制的消息和某个网络 Interface 进入 activity 或 idle 状态的消息.
+
+
+19.1.3 处理 NMS 消息
+    CommandListener 对象用来处理从 NetworkManagementService 中发送的命令.
+
+    CommandListener 类中注册的命令如下:
+        CommandListener::CommandListener() : FrameworkListener(SOCKET_NAME, true) {
+            registerLockingCmd(new InterfaceCmd());
+            registerLockingCmd(new IpFwdCmd(), gCtls->tetherCtrl.lock);
+            registerLockingCmd(new TetherCmd(), gCtls->tetherCtrl.lock);
+            registerLockingCmd(new NatCmd(), gCtls->tetherCtrl.lock);
+            registerLockingCmd(new ListTtysCmd());
+            registerLockingCmd(new PppdCmd());
+            registerLockingCmd(new BandwidthControlCmd(), gCtls->bandwidthCtrl.lock);
+            registerLockingCmd(new IdletimerControlCmd());
+            registerLockingCmd(new ResolverCmd());
+            registerLockingCmd(new FirewallCmd(), gCtls->firewallCtrl.lock);
+            registerLockingCmd(new ClatdCmd());
+            registerLockingCmd(new NetworkCommand());
+            registerLockingCmd(new StrictCmd());
+        }
+        InterfaceCmd 对象用来处理 各种网络 Interface 相关的命令, 例如, 添加删除 Interface, 列出所有 Interface 等
+        IpFwdCmd            处理  IP 转发的命令, 包括 status, enable 和 disable 命令
+        TetherCmd           处理 网络共享的命令
+        NatCmd              处理 带宽控制的命令
+        ListTtysCmd         处理 获取pppd中tty列表的命令
+        PppdCmd             处理 连接pppd拨号网络的命令, 例如, attach, detach 等
+        BandwidthControlCmd 处理 带宽控制的命令
+        IdletimerControlCmd 处理 设置监听网络接口空闲的命令
+        ResolverCmd         处理解析网络地址的命令, 包括设置 dns 服务器的地址
+        FirewallCmd         处理设置防火墙的命令
+        ClatdCmd            处理启动或停止clatd的命令
+        NetworkCommand
+        StrictCmd
+        这些命令的数量非常庞大, 但是处理的模式相似, 比较简单, 这里就不展开分析了.
 
 
 
+19.1.4 DNS 服务代理
+    DnsProxyListener 对象实现了DNS服务的代理功能, 它注册了以下的命令:
+        static constexpr const char* SOCKET_NAME = "dnsproxyd";
+        DnsProxyListener::DnsProxyListener(const NetworkController* netCtrl, EventReporter* eventReporter) : FrameworkListener(SOCKET_NAME), mNetCtrl(netCtrl), mEventReporter(eventReporter) {
+           registerCmd(new GetAddrInfoCmd(this));
+           registerCmd(new GetHostByAddrCmd(this));
+           registerCmd(new GetHostByNameCmd(this));
+        }
+        GetAddrInfoCmd      完成主机名到IP地址解析
+        GetHostByAddrCmd    完成从IP地址到主机名的解析
+        GetHostByNameCmd    通过主机名获得主机信息
+    DnsProxyListener 监听socket "/dev/socket/dnsproxyd" 上的连接, 但是和 CommandListener 不一样, 它并没有和java层的 NativeDaemonConnector 对象连接在一起.
+
+    下面以处理 GetAddrInfoCmd 命令为例来继续讲解
+    下面看 libc 中 getaddrinfo() 函数在 /bionic/libc/dns/net/getaddrinfo.c 的调用流程:
+        getaddrinfo()   -> android_getaddrinfofornet()
+                        -> android_getaddrinfofornetcontext()
+                        -> android_getaddrinfo_proxy()
+                        -> android_open_proxy()
+
+
+    下面看 android_getaddrinfo_proxy() 函数在 /bionic/libc/dns/net/getaddrinfo.c 文件中的代码如下:
+        #if defined(__ANDROID__)
+        static int android_getaddrinfo_proxy(const char *hostname, const char *servname, const struct addrinfo *hints, struct addrinfo **res, unsigned netid) {
+            int success = 0;
+            *res = NULL;
+
+            FILE* proxy = android_open_proxy(); // 连接 DnsProxyListener 中监听的 socket
+            if (proxy == NULL) {
+                return EAI_SYSTEM;
+            }
+
+            netid = __netdClientDispatch.netIdForResolv(netid); //
+
+            if (fputc(0, proxy) == EOF || fflush(proxy) != 0) { // 然后发送命令, 从这里我们知道 DnsProxyListener 对象监听的是来自 Bionic 的 netbsd 模块的连接.
+                goto exit;
+            }
+
+            char buf[4];
+            // 为 gethostbyaddr 读取结果
+            if (fread(buf, 1, sizeof(buf), proxy) != sizeof(buf)) {
+                goto exit;
+            }
+
+            int result_code = (int)strtol(buf, NULL, 10);
+            // verify the code itself
+            if (result_code != DnsProxyQueryResult) {
+                fread(buf, 1, sizeof(buf), proxy);
+                goto exit;
+            }
+
+            struct addrinfo* ai = NULL;
+            struct addrinfo** nextres = res;
+            while (1) {
+                int32_t have_more;
+                if (!readBE32(proxy, &have_more)) {
+                    break;
+                }
+                if (have_more == 0) {
+                    success = 1;
+                    break;
+                }
+
+                struct addrinfo* ai = calloc(1, sizeof(struct addrinfo) + sizeof(struct sockaddr_storage));
+                if (ai == NULL) {
+                    break;
+                }
+                ai->ai_addr = (struct sockaddr*)(ai + 1);
+
+                // struct addrinfo {
+                //	int	ai_flags;	/* AI_PASSIVE, AI_CANONNAME, AI_NUMERICHOST */
+                //	int	ai_family;	/* PF_xxx */
+                //	int	ai_socktype;	/* SOCK_xxx */
+                //	int	ai_protocol;	/* 0 or IPPROTO_xxx for IPv4 and IPv6 */
+                //	socklen_t ai_addrlen;	/* length of ai_addr */
+                //	char	*ai_canonname;	/* canonical name for hostname */
+                //	struct	sockaddr *ai_addr;	/* binary address */
+                //	struct	addrinfo *ai_next;	/* next structure in linked list */
+                // };
+
+                // Read the struct piece by piece because we might be a 32-bit process
+                // talking to a 64-bit netd.
+                int32_t addr_len;
+                bool success =
+                        readBE32(proxy, &ai->ai_flags) &&
+                        readBE32(proxy, &ai->ai_family) &&
+                        readBE32(proxy, &ai->ai_socktype) &&
+                        readBE32(proxy, &ai->ai_protocol) &&
+                        readBE32(proxy, &addr_len);
+                if (!success) {
+                    break;
+                }
+
+                // Set ai_addrlen and read the ai_addr data.
+                ai->ai_addrlen = addr_len;
+                if (addr_len != 0) {
+                    if ((size_t) addr_len > sizeof(struct sockaddr_storage)) {
+                        // Bogus; too big.
+                        break;
+                    }
+                    if (fread(ai->ai_addr, addr_len, 1, proxy) != 1) {
+                        break;
+                    }
+                }
+
+                // The string for ai_cannonname.
+                int32_t name_len;
+                if (!readBE32(proxy, &name_len)) {
+                    break;
+                }
+                if (name_len != 0) {
+                    ai->ai_canonname = (char*) malloc(name_len);
+                    if (fread(ai->ai_canonname, name_len, 1, proxy) != 1) {
+                        break;
+                    }
+                    if (ai->ai_canonname[name_len - 1] != '\0') {
+                        // The proxy should be returning this
+                        // NULL-terminated.
+                        break;
+                    }
+                }
+
+                *nextres = ai;
+                nextres = &ai->ai_next;
+                ai = NULL;
+            }
+
+            if (ai != NULL) {
+                // Clean up partially-built addrinfo that we never ended up
+                // attaching to the response.
+                freeaddrinfo(ai);
+            }
+        exit:
+            if (proxy != NULL) {
+                fclose(proxy);
+            }
+
+            if (success) {
+                return 0;
+            }
+
+            // Proxy failed;
+            // clean up memory we might've allocated.
+            if (*res) {
+                freeaddrinfo(*res);
+                *res = NULL;
+            }
+            return EAI_NODATA;
+        }
+        #endif
+
+    下面看 android_open_proxy() 函数在 /bionic/libc/dns/net/gethnamaddr.c 文件中的代码如下:
+        __LIBC_HIDDEN__ FILE* android_open_proxy() {
+            const char* cache_mode = getenv("ANDROID_DNS_MODE");    // 获取环境变量 ANDROID_DNS_MODE 的值
+            bool use_proxy = (cache_mode == NULL || strcmp(cache_mode, "local") != 0);  // 如果值为 NULL 或者 不等于 "local"
+            if (!use_proxy) {
+                return NULL;    // 直接返回
+            }
+
+            int s = socket(AF_UNIX, SOCK_STREAM | SOCK_CLOEXEC, 0); // 创建 socket
+            if (s == -1) {
+                return NULL;
+            }
+
+            const int one = 1;
+            setsockopt(s, SOL_SOCKET, SO_REUSEADDR, &one, sizeof(one));
+            struct sockaddr_un proxy_addr;
+            memset(&proxy_addr, 0, sizeof(proxy_addr));
+            proxy_addr.sun_family = AF_UNIX;
+            // 连接 DnsProxyListener 中监听的 socket, ""/dev/socket/dnsproxyd""
+            strlcpy(proxy_addr.sun_path, "/dev/socket/dnsproxyd", sizeof(proxy_addr.sun_path));
+
+            if (TEMP_FAILURE_RETRY(connect(s, (const struct sockaddr*) &proxy_addr, sizeof(proxy_addr))) != 0) {
+                close(s);
+                return NULL;
+            }
+
+            return fdopen(s, "r+"); // 打开 socket
+        }
+
+    那么GetAddrInfoCmd 命令是如何处理的呢?
+    下面看看 GetAddrInfoCmd 的 runCommand()函数代码如下:
+        int DnsProxyListener::GetAddrInfoCmd::runCommand(SocketClient *cli, int argc, char **argv) {
+            // ....
+            // 创建 GetAddrInfoHandler 对象, 并调用它的 start() 函数
+            DnsProxyListener::GetAddrInfoHandler* handler = new DnsProxyListener::GetAddrInfoHandler(cli, name, service, hints, netcontext, metricsLevel, mDnsProxyListener->mEventReporter->getNetdEventListener());
+            tryThreadOrError(cli, handler);
+            return 0;
+        }
+
+    下面看看 GetAddrInfoHandler 中 run() 函数代码如下:
+        void DnsProxyListener::GetAddrInfoHandler::run() {
+            struct addrinfo* result = NULL;
+            Stopwatch s;
+            maybeFixupNetContext(&mNetContext);
+            const uid_t uid = mClient->getUid();
+            uint32_t rv = 0;
+            if (queryLimiter.start(uid)) {
+                rv = android_getaddrinfofornetcontext(mHost, mService, mHints, &mNetContext, &result);  //此处又调用了 android_getaddrinfofornetcontext()函数
+                queryLimiter.finish(uid);
+            } else {
+                rv = EAI_MEMORY;
+            }
+            const int latencyMs = lround(s.timeTaken());
+
+            if (rv) {
+                // getaddrinfo failed
+                mClient->sendBinaryMsg(ResponseCode::DnsProxyOperationFailed, &rv, sizeof(rv));
+            } else {
+                bool success = !mClient->sendCode(ResponseCode::DnsProxyQueryResult);
+                struct addrinfo* ai = result;
+                while (ai && success) {
+                    success = sendBE32(mClient, 1) && sendaddrinfo(mClient, ai);
+                    ai = ai->ai_next;
+                }
+                success = success && sendBE32(mClient, 0);
+                if (!success) {
+                    ALOGW("Error writing DNS result to client");
+                }
+            }
+            std::vector<String16> ip_addrs;
+            int total_ip_addr_count = 0;
+            if (result) {
+                if (mNetdEventListener != nullptr
+                        && mReportingLevel == INetdEventListener::REPORTING_LEVEL_FULL) {
+                    for (addrinfo* ai = result; ai; ai = ai->ai_next) {
+                        sockaddr* ai_addr = ai->ai_addr;
+                        if (ai_addr) {
+                            addIpAddrWithinLimit(ip_addrs, ai_addr, ai->ai_addrlen);
+                            total_ip_addr_count++;
+                        }
+                    }
+                }
+                freeaddrinfo(result);
+            }
+            mClient->decRef();
+            if (mNetdEventListener != nullptr) {
+                switch (mReportingLevel) {
+                    case INetdEventListener::REPORTING_LEVEL_NONE:
+                        // Skip reporting.
+                        break;
+                    case INetdEventListener::REPORTING_LEVEL_METRICS:
+                        // Metrics reporting is on. Send metrics.
+                        mNetdEventListener->onDnsEvent(mNetContext.dns_netid,
+                                                       INetdEventListener::EVENT_GETADDRINFO, (int32_t) rv,
+                                                       latencyMs, String16(""), {}, -1, -1);
+                        break;
+                    case INetdEventListener::REPORTING_LEVEL_FULL:
+                        // Full event info reporting is on. Send full info.
+                        mNetdEventListener->onDnsEvent(mNetContext.dns_netid,
+                                                       INetdEventListener::EVENT_GETADDRINFO, (int32_t) rv,
+                                                       latencyMs, String16(mHost), ip_addrs,
+                                                       total_ip_addr_count, mNetContext.uid);
+                        break;
+                }
+            } else {
+                ALOGW("Netd event listener is not available; skipping.");
+            }
+        }
+    注:
+        从上面可以看到 GetAddrInfoHandler 的 run() 函数又调用了 android_getaddrinfofornetcontext() 函数, 我们本来
+        就是从 android_getaddrinfofornetcontext() 函数中一路分析过来的, 这里又调用了这个函数, 难道这里是递归调用吗?
+
+        我们要注意, 其实进程已经发生了变化, 前面调用这个函数是在某个用户进程中, 而现在处于 netd 进程中,
+        我们前面分析 netd 的 main 函数时, 已经注意到 main 函数中增加了一个环境变量 setenv("ANDROID_DNS_MODE", "local", 1),
+        "ANDROID_DNS_MODE" 就是 android_getaddrinfofornetcontext() 函数中用来判断的环境变量, 因此不会出现递归调用.
+
+        那么为什么要绕到 netd 进程来调用这个函数呢?
+        前面介绍 CommandListener 的命令时我们简单介绍了 ResolverCmd 的作用, 这个对象中有设置 dns 服务器的命令,
+        命令的结果是将 dns 服务器保存在了 netbsd 模块的 _res_cache_list 列表中, 除了这条命令, ResolverCmd 中
+        还有一些和dns 相关的命令将引起 netd 进程中 dns 相关的 cache 变化. 因为只有netd进程中才会保存这些信息,
+        所以, 普通进程进行地址解析时就必须到 netd 中来完成实际的解析工作.
 
 
 
+19.1.5 MDnsSdListener 的作用-与守护进程进行交互
+    MDnsSdListener 类中注册命令在 /system/netd/server/MDnsSdListener.cpp 文件中的代码如下:
+        MDnsSdListener::MDnsSdListener() : FrameworkListener(SOCKET_NAME, true) {
+            Monitor *m = new Monitor();
+            registerCmd(new Handler(m, this));
+        }
+
+    MDnsSdListener 中的命令主要作用是和 mdsnd 守护进程进行交互. 包括启动和停止 mdsnd 守护进程, 通过 mdsnd 来解析一些服务的地址等.
+
+    MDnsSdListener 服务于java层的 NsdService, 它们的关系可以用下图表示(图19.3 MDnsSdListener 连接图):
+                                                          socket
+        C++层 mdsnd -------> C++层 netd(MDnsSdListener) <---------> Java层 NativeDaemonConnector <---> NsdService
 
 
 
+19.2 网络管理的中心-ConnectivityService 服务
+    ConnectivityService 服务是Android网络管理的中心, 它也是在 SystemServer 中创建的, 代码如下:
+        networkManagement = NetworkManagementService.create(context);
+        ServiceManager.addService(Context.NETWORKMANAGEMENT_SERVICE, networkManagement);
+
+        ipSecService = IpSecService.create(context);
+        ServiceManager.addService(Context.IPSEC_SERVICE, ipSecService);
+
+        mSystemServiceManager.startService(NetworkScoreService.Lifecycle.class);
+
+        networkStats = NetworkStatsService.create(context, networkManagement);
+        ServiceManager.addService(Context.NETWORK_STATS_SERVICE, networkStats);
+
+        networkPolicy = new NetworkPolicyManagerService(context, mActivityManagerService, networkManagement);
+        ServiceManager.addService(Context.NETWORK_POLICY_SERVICE, networkPolicy);
+
+        if (!mOnlyCore) {
+            if (context.getPackageManager().hasSystemFeature(PackageManager.FEATURE_WIFI)) {
+                // StartWifi (Wifi Service must be started first for wifi-related services);
+                mSystemServiceManager.startService(WIFI_SERVICE_CLASS);
+                // StartWifiScanning
+                mSystemServiceManager.startService("com.android.server.wifi.scanner.WifiScanningService");
+            }
+            if (context.getPackageManager().hasSystemFeature(PackageManager.FEATURE_WIFI_RTT)) {
+                // StartRttService
+                mSystemServiceManager.startService("com.android.server.wifi.rtt.RttService");
+            }
+            if (context.getPackageManager().hasSystemFeature(PackageManager.FEATURE_WIFI_AWARE)) {
+                //StartWifiAware
+                mSystemServiceManager.startService(WIFI_AWARE_SERVICE_CLASS);
+            }
+            if (context.getPackageManager().hasSystemFeature(PackageManager.FEATURE_WIFI_DIRECT)) {
+                // StartWifiP2P
+                mSystemServiceManager.startService(WIFI_P2P_SERVICE_CLASS);
+            }
+            if (context.getPackageManager().hasSystemFeature(PackageManager.FEATURE_LOWPAN)) {
+                //StartLowpan
+                mSystemServiceManager.startService(LOWPAN_SERVICE_CLASS);
+            }
+        }
+        if (mPackageManager.hasSystemFeature(PackageManager.FEATURE_ETHERNET) || mPackageManager.hasSystemFeature(PackageManager.FEATURE_USB_HOST)) {
+            // StartEthernet
+            mSystemServiceManager.startService(ETHERNET_SERVICE_CLASS);
+        }
+
+        // 创建 ConnectivityService 服务
+        connectivity = new ConnectivityService(context, networkManagement, networkStats, networkPolicy);
+        ServiceManager.addService(Context.CONNECTIVITY_SERVICE, connectivity, /* allowIsolated= */ false, DUMP_FLAG_PRIORITY_HIGH | DUMP_FLAG_PRIORITY_NORMAL);
+
+        networkStats.bindConnectivityManager(connectivity);
+        networkPolicy.bindConnectivityManager(connectivity);
+
+        serviceDiscovery = NsdService.create(context);
+        ServiceManager.addService(Context.NSD_SERVICE, serviceDiscovery);
+
+
+19.2.1 初始化过程
+    ConnectivityService 的构造方法非常长, 这里就不看代码了, 执行过程如下:
+
+
+19.2.2 网络连接类型
+    网络连接类型的定义位于 ConnectivityManager 类, 它是 ConnectivityService 的代理类, 已经废弃的定义如下:
+        public static final int TYPE_NONE        = -1;
+        public static final int TYPE_MOBILE      = 0;
+        public static final int TYPE_WIFI        = 1;
+        public static final int TYPE_MOBILE_MMS  = 2;
+        public static final int TYPE_MOBILE_SUPL = 3;
+        public static final int TYPE_MOBILE_DUN  = 4;
+        public static final int TYPE_MOBILE_HIPRI = 5;
+        public static final int TYPE_WIMAX       = 6;
+        public static final int TYPE_BLUETOOTH   = 7;
+        public static final int TYPE_DUMMY       = 8;
+        public static final int TYPE_ETHERNET    = 9;
+        public static final int TYPE_MOBILE_FOTA = 10;
+        public static final int TYPE_MOBILE_IMS  = 11;
+        public static final int TYPE_MOBILE_CBS  = 12;
+        public static final int TYPE_WIFI_P2P    = 13;
+        public static final int TYPE_MOBILE_IA = 14;
+        public static final int TYPE_MOBILE_EMERGENCY = 15;
+        public static final int TYPE_PROXY = 16;
+        public static final int TYPE_VPN = 17;
+    新的定义在 NetworkCapabilities 类中:
+        NET_CAPABILITY_MMS,
+        NET_CAPABILITY_SUPL,
+        NET_CAPABILITY_DUN,
+        NET_CAPABILITY_FOTA,
+        NET_CAPABILITY_IMS,
+        NET_CAPABILITY_CBS,
+        NET_CAPABILITY_WIFI_P2P,
+        NET_CAPABILITY_IA,
+        NET_CAPABILITY_RCS,
+        NET_CAPABILITY_XCAP,
+        NET_CAPABILITY_EIMS,
+        NET_CAPABILITY_NOT_METERED,
+        NET_CAPABILITY_INTERNET,
+        NET_CAPABILITY_NOT_RESTRICTED,
+        NET_CAPABILITY_TRUSTED,
+        NET_CAPABILITY_NOT_VPN,
+        NET_CAPABILITY_VALIDATED,
+        NET_CAPABILITY_CAPTIVE_PORTAL,
+        NET_CAPABILITY_NOT_ROAMING,
+        NET_CAPABILITY_FOREGROUND,
+        NET_CAPABILITY_NOT_CONGESTED,
+        NET_CAPABILITY_NOT_SUSPENDED,
+        NET_CAPABILITY_OEM_PAID,
+    通过系统资源的 /frameworks/base/core/res/res/values/config.xml 中 networkAttributes 数组中定义系统中支持的连接类型:
+        <string-array translatable="false" name="networkAttributes">
+            <item>"wifi,1,1,1,-1,true"</item>
+            <item>"mobile,0,0,0,-1,true"</item>
+            <item>"mobile_mms,2,0,2,60000,true"</item>
+            <item>"mobile_supl,3,0,2,60000,true"</item>
+            <item>"mobile_dun,4,0,2,60000,true"</item>
+            <item>"mobile_hipri,5,0,3,60000,true"</item>
+            <item>"mobile_fota,10,0,2,60000,true"</item>
+            <item>"mobile_ims,11,0,2,60000,true"</item>
+            <item>"mobile_cbs,12,0,2,60000,true"</item>
+            <item>"wifi_p2p,13,1,0,-1,true"</item>
+            <item>"mobile_ia,14,0,2,-1,true"</item>
+            <item>"mobile_emergency,15,0,2,-1,true"</item>
+        </string-array>
+    注:
+        数据元素中第一项是连接名称, 第二项是连接类型, 第三项表示是否是移动连接类型, 第四项是优先级.
+
+    下面看看 ConnectivityService 如何处理网络切换, 网络切换在 handleAsyncChannelHalfConnect() 函数中,
+
+
+19.2.3 NetworkStateTracker 对象的作用 - 获得网络连接信息
 
 
 
+19.3 NetworkManagementService 服务 - 完成对网络物理接口操作
 
 
-
-
-
-
+19.4 总结
 
 

@@ -1,6 +1,5 @@
-第三章 连接Android和Linux内核的桥梁－Android的Bionic
+第三章 连接 Android 和 Linux 内核的桥梁 － Android 的 Bionic
 
-<<<<<<< HEAD
 
 3.1 Bionic简介
 3.1.1 Bionic的特性
@@ -51,5 +50,3 @@
 3.10.2 Hook API的原理
 3.10.3 利用ptrace实现
 Hook API 
-=======
->>>>>>> 2f289295a7bee3b9a989b1c4b9e7fe0cf492964d
