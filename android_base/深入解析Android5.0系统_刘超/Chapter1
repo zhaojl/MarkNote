@@ -126,11 +126,11 @@ Build command:
     Android HLOS only:
         sync -j8 -qc --no-tags
         source build/envsetup.sh
-        lunch df91_hu_mpc-userdebug
+        lunch ###_hu_mpc-userdebug
         make -j8
 
     Full build for QFIL package:
-        ./make_leauto.sh -b qfil -p df91_hu_mpc -t emmc -j8
+        ./make_leauto.sh -b qfil -p ###_hu_mpc -t emmc -j8
 
 
 Potential issues and solutions:
