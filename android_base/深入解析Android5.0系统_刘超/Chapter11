@@ -1,33 +1,1970 @@
-第11章 APK 包的安装、卸载和优化——Android 的应用管理
+第11章 Android 的应用管理 —— APK 包的安装、卸载和优化
+
+
+
+Android 的应用管理主要是通过 PackageManagerService 来完成的, PackageManagerService 服务负责各种 APK 包的安装,卸载,优化和查询.
+
+PMS 启动时会扫描所有 APK 文件 和 Jar 包, 然后把它们的信息读取出来, 保存在内存中, 这样系统运行时就能迅速找到各种应用和组件的信息. 扫描过程中如果遇到没有优化的文件, 还要执行转换工作, 将app文件从 dex 格式转换成 oat 格式.
+
+PMS 启动后, PMS 将提供安装包的信息查询服务以及应用的安装和卸载服务.
+Android 5.0 以前, /data/app 或者 /system/app 目录下存放的都是 apk 文件.
+Android 5.0 以后, /data/app 或者 /system/app 目录下存放的是应用名称命名的目录, 在这个目录下存放的才是 apk 文件和 lib 目录, lib 目录下存放的是应用的 so 文件.
+
+PMS 中有一些比较难以理解的规则, 但是代码中很多地方都在处理这些规则, 这些规则涉及各种应用安装包的关系, 如果理解了它们的关系, 就能更容易的理解 PMS 代码的含义.
+下面先介绍这些规则:
+    Android 中的应用可以简单地分成两大类: 系统应用和普通应用.
+
+    1. 系统应用
+        系统应用是指位于 /system/app 或者 /system/priv-app 目录下的应用.
+        /system/priv-app 目录是从 Android 4.4 开始出现的目录, 里面存放的是一些系统底层应用, 如:Settings, SystemUI等.
+        /system/app 中存放的是一些系统级应用, 如: Phone, Contacts等.
+        在 PMS 中, 所谓的 system 应用包括这两个目录下的应用, 而所谓的 private 应用则特指 priv-app 目录下的应用.
+
+    2. 普通应用
+        普通应用是用户安装的应用, 位于目录 /data/app 目录下. 普通应用还可以安装在 SD 卡上, 但是系统应用不可以.
+
+    3.系统应用的升级
+        通常情况下系统应用是不可以删除的, 但是可以升级.
+        升级的方法是安装一个包名相同, 但是具有更高版本号的应用在 /data/app 目录下, 对于系统中的这种升级情况, Android 会在 /data/system/packages.xml 文件中用标签 <update-package> 记录被覆盖的系统应用的信息.
+
+        升级过程中更复杂的情况是: 应用在 AndroidManifest.xml 文件中的<manifest>标签中用 "package" 属性指定包名之后, 同时还用<original-package> 指定了原始包的名称.
+
+        同时指定了 package 和 original-package 应用运行时看到的包名是什么呢? 答案是两个都有可能:
+            如果安装的设备中不存在和 original-package 指定的包名相同的系统应用, ddms中看到的将是 package 属性定义的包名.
+            如果安装的设备中还存在低版本并且包名和 original-package 指定的名称相同的应用, 这样虽然最后运行的是新安装的应用, 但ddms中看到的将是 original-package 标签中定义的包名.
+            因为这样也构成了升级关系. Android 会在 /data/system/packages.xml 文件中用标签 <renamed-package> 记录这种改名的情况.
+
+        下面请看源码中同时使用 package 和 original-package 的实例:
+
+            实例1, 代码路径 /packages/apps/DeskClock/AndroidManifest.xml
+                <manifest xmlns:android="http://schemas.android.com/apk/res/android" package="com.android.deskclock">
+                    <original-package android:name="com.android.alarmclock" />
+                    <original-package android:name="com.android.deskclock" />
+
+            实例2, 代码路径 /packages/apps/Launcher2/AndroidManifest.xml
+                <manifest xmlns:android="http://schemas.android.com/apk/res/android" package="com.android.launcher">
+                    <original-package android:name="com.android.launcher2" />
+
+            实例3, 代码路径 /frameworks/base/packages/WAPPushManager/AndroidManifest.xml
+                <manifest xmlns:android="http://schemas.android.com/apk/res/android" package="com.android.smspush">
+                    <permission android:name="com.android.smspush.WAPPUSH_MANAGER_BIND" android:protectionLevel="signatureOrSystem" />
+                    <original-package android:name="com.android.smspush" />
+
+            实例4, 代码路径 /packages/apps/Provision/AndroidManifest.xml
+            <manifest xmlns:android="http://schemas.android.com/apk/res/android" package="com.android.provision">
+                <original-package android:name="com.android.provision" />
+    4. 重要目录介绍
+        如果系统运行在 art 模式下, 系统目录 /data/dalvik-cache 下保存的是 oat 格式的文件, 这种文件格式是 Linux 的 ELF 格式的一种私有形式.
+        如果系统运行在 dalvik 模式下, 系统目录 /data/dalvik-cache 下保存的是大部分的 apk 文件和 jar 包的 odex 版本. odex是一种优化过的格式, 执行速度比 apk 文件中的 dex 格式更快.
+
+        每个应用都有保存数据的目录, 位于 /data/data/<包名>/目录下, 最常见的2个子目录是 database 目录中保存的是应用的数据库 和 shared_prefs目录中保存的是应用的设置文件.
+
+守护进程 installd
+
+
+11.1 了解 PMS
+    在应用中如果需要使用 PMS 服务, 通常是调用 Context.getPackageManager() 方法, 得到 PackageManager 对象, 示例代码如下:
+        public class MainActivity extends AppCompatActivity {
+
+            @Override
+            protected void onCreate(Bundle savedInstanceState) {
+                super.onCreate(savedInstanceState);
+                setContentView(R.layout.activity_main);
+
+                PackageManager packageManager = getPackageManager();
+            }
+        }
+
+    下面看 getPackageManager() 方法在 android.app.ContextImpl 文件中的实现代码:
+        @Override
+        public PackageManager getPackageManager() {
+            if (mPackageManager != null) {
+                return mPackageManager;
+            }
+            IPackageManager pm = ActivityThread.getPackageManager();    // 获取 PMS 的引用对象并赋给 pm
+            if (pm != null) {
+                // Doesn't matter if we make more than one instance.
+                return (mPackageManager = new ApplicationPackageManager(this, pm)); // 创建 ApplicationPackageManager 对象并赋给 mPackageManager
+            }
+            return null;
+        }
+        注:
+            IPackageManager 类型的对象 pm 是一个 PMS 的引用对象.
+            ApplicationPackageManager 对象就是 PMS 的代理对象.
+            ApplicationPackageManager 对象继承自 PackageManager 类, PackageManager 类里面定义了应用可以操作 PMS 的所有接口.
+            ApplicationPackageManager 类定义: public class ApplicationPackageManager extends PackageManager
+
+    下面看 PMS 的两个重要成员变量 mInstallerService 和 mInstaller 与应用安装有密切关系. 这两个变量的定义如下:
+        final Installer mInstaller;
+        final PackageInstallerService mInstallerService;
+        注:
+            一个应用的安装过程比较长, Android 5.0 中新增加了 PackageInstallerService 来管理应用安装的过程.
+
+    下面看 Installer 类的重要成员变量:
+        public class Installer extends SystemService {
+            private volatile IInstalld mInstalld;       // daemon 进程 installd
+            private volatile Object mWarnIfHeld;
+        }
+        注:
+            实际上系统中进行 apk 文件格式转换, 建立数据目录等工作最后是由 installd 进程来完成的.
+
+    下面看 PMS 主要对象关系图:
+
+           上层应用                                 SystemServer 进程                                     Installd进程
+                                                                     mInstaller            socket
+        ApplicationPackageManager --binder--> PackageManagerService -----------> Installer --------> Installd进程
+                                                    |
+                                                    |mInstallerService
+                                                    |
+        PackageInstaller -----------binder--> PackageInstallerService
+        PackageInfo
+        PackageItemInfo
+        PackageManager
+
+
+11.1.1 理解 packages.xml 和 Settings 类
+
+    Settings 类用来保存和 PMS 相关的一些设置, 它所保存的内容在解析应用时会用到. 那么 Settings 中保存的值是从哪里来的? 作用又是什么呢?
+
+    下面我们先看看 com.android.server.pm.Settings 类的构造方法, 代码如下:
+        Settings(PermissionSettings permissions, Object lock) {
+            this(Environment.getDataDirectory(), permissions, lock);
+        }
+
+        Settings(File dataDir, PermissionSettings permission, Object lock) {
+            mLock = lock;
+            mPermissions = permission;
+            mRuntimePermissionsPersistence = new RuntimePermissionPersistence(mLock);
+
+            mSystemDir = new File(dataDir, "system");
+            mSystemDir.mkdirs();    // 在 data 目录下创建 system 目录
+            FileUtils.setPermissions(mSystemDir.toString(),
+                    FileUtils.S_IRWXU|FileUtils.S_IRWXG
+                    |FileUtils.S_IROTH|FileUtils.S_IXOTH,
+                    -1, -1);        // 设置目录的属性为 0775
+            mSettingsFilename = new File(mSystemDir, "packages.xml");
+            mBackupSettingsFilename = new File(mSystemDir, "packages-backup.xml");
+            mPackageListFilename = new File(mSystemDir, "packages.list");
+            FileUtils.setPermissions(mPackageListFilename, 0640, SYSTEM_UID, PACKAGE_INFO_GID);
+
+            final File kernelDir = new File("/config/sdcardfs");
+            mKernelMappingFilename = kernelDir.exists() ? kernelDir : null;
+
+            // Deprecated: Needed for migration
+            mStoppedPackagesFilename = new File(mSystemDir, "packages-stopped.xml");
+            mBackupStoppedPackagesFilename = new File(mSystemDir, "packages-stopped-backup.xml");
+        }
+        注:
+            这个函数的主要工作是创建了 5 个位于目录 /data/system 的 File 对象, 分别是:
+                packages.xml                记录系统中所有安装的应用信息, 包括基本信息, 签名和权限.
+                packages.list               保存普通应用的数据目录和uid等信息
+                packages-stopped.xml        记录系统中被强制停止运行的应用信息, 系统在强制停止某个应用时, 会将应用的信息记录到该文件中.
+                packages-backup.xml         packages.xml文件的备份
+                packages-stopped-backup.xml packages-stopped.xml文件的备份
+
+            这5个文件中packages-backup.xml和packages-stopped-backup.xml是备份文件, 当 Android 对文件 packages.xml 和 packages-stopped.xml 写之前, 会先把它们备份;
+            如果写文件成功了, 再把备份文件删除掉;
+            如果写的时候, 系统出问题了, 重启后再需要读取这两个文件时, 发现备份文件存在, 会使用备份文件的内容, 因为原文件可能已经损坏了.
+
+    packages.xml 是 PMS 启动时需要用到的文件, 先看看这个文件中的内容:
+
+
+    class PackageSignatures
+    public final class SharedUserSetting extends SettingBase {
+    public final class PackageSetting extends PackageSettingBase
+    public abstract class PackageSettingBase extends SettingBase
+
+
+    下面看 Settings 中定义的4个成员变量, 这是4个成员变量是 PMS 代码中经常遇到的, 需要记住它们的作用:
+        // 保存标签<package> 所标识的应用的 PackageSetting 对象
+        final ArrayMap<String, PackageSetting> mPackages = new ArrayMap<>();
+
+        // 保存标签<updated-package> 所标识的系统应用的 PackageSetting 对象
+        private final ArrayMap<String, PackageSetting> mDisabledSysPackages = new ArrayMap<String, PackageSetting>();
+
+        // 保存标签<cleaning-package> 所标识的那些已经删除, 但是数据目录还暂时保留的应用信息
+        final ArrayList<PackageCleanItem> mPackagesToBeCleaned = new ArrayList<PackageCleanItem>();
+
+        // 保存标签<renamed-package> 所标识的系统中改名应用的新旧包名
+        private final ArrayMap<String, String> mRenamedPackages = new ArrayMap<String, String>();
+
+    下面看 Settings 类中用来解析 packages.xml 文件的 readLPw() 函数实现代码, 代码如下:
+        boolean readLPw(@NonNull List<UserInfo> users) {
+            ......
+            try {
+                if (str == null) {
+                    if (!mSettingsFilename.exists()) {
+                        mReadMessages.append("No settings file found\n");
+                        PackageManagerService.reportSettingsProblem(Log.INFO, "No settings file; creating initial state");
+                        // It's enough to just touch version details to create them with default values
+                        findOrCreateVersion(StorageManager.UUID_PRIVATE_INTERNAL).forceCurrent();
+                        findOrCreateVersion(StorageManager.UUID_PRIMARY_PHYSICAL).forceCurrent();
+                        return false;
+                    }
+                    str = new FileInputStream(mSettingsFilename);
+                }
+                XmlPullParser parser = Xml.newPullParser();
+                parser.setInput(str, StandardCharsets.UTF_8.name());
+
+                int type;
+                while ((type = parser.next()) != XmlPullParser.START_TAG && type != XmlPullParser.END_DOCUMENT) {
+                    ;
+                }
+
+                if (type != XmlPullParser.START_TAG) {
+                    mReadMessages.append("No start tag found in settings file\n");
+                    PackageManagerService.reportSettingsProblem(Log.WARN, "No start tag found in package manager settings");
+                    return false;
+                }
+
+                int outerDepth = parser.getDepth();
+                while ((type = parser.next()) != XmlPullParser.END_DOCUMENT && (type != XmlPullParser.END_TAG || parser.getDepth() > outerDepth)) {
+                    if (type == XmlPullParser.END_TAG || type == XmlPullParser.TEXT) {
+                        continue;
+                    }
+
+                    String tagName = parser.getName();
+                    if (tagName.equals("package")) {                        // <package>
+                        readPackageLPw(parser);
+                    } else if (tagName.equals("permissions")) {             // <permissions>
+                        mPermissions.readPermissions(parser);
+                    } else if (tagName.equals("permission-trees")) {        // <permission-trees>
+                        mPermissions.readPermissionTrees(parser);
+                    } else if (tagName.equals("shared-user")) {             // <shared-user>
+                        readSharedUserLPw(parser);
+                    } else if (tagName.equals("preferred-packages")) {      // <preferred-packages>
+                    } else if (tagName.equals("preferred-activities")) {    // <preferred-activities>
+                        readPreferredActivitiesLPw(parser, 0);
+                    } else if (tagName.equals(TAG_PERSISTENT_PREFERRED_ACTIVITIES)) {   // <persistent-preferred-activities>
+                        readPersistentPreferredActivitiesLPw(parser, 0);
+                    } else if (tagName.equals(TAG_CROSS_PROFILE_INTENT_FILTERS)) {      // <crossProfile-intent-filters>
+                        readCrossProfileIntentFiltersLPw(parser, 0);
+                    } else if (tagName.equals(TAG_DEFAULT_BROWSER)) {                   // <default-browser>
+                        readDefaultAppsLPw(parser, 0);
+                    } else if (tagName.equals("updated-package")) {                     // <updated-package>
+                        readDisabledSysPackageLPw(parser);
+                    } else if (tagName.equals("cleaning-package")) {                    // <cleaning-package>
+                        String name = parser.getAttributeValue(null, ATTR_NAME);
+                        String userStr = parser.getAttributeValue(null, ATTR_USER);
+                        String codeStr = parser.getAttributeValue(null, ATTR_CODE);
+                        if (name != null) {
+                            int userId = UserHandle.USER_SYSTEM;
+                            boolean andCode = true;
+                            try {
+                                if (userStr != null) {
+                                    userId = Integer.parseInt(userStr);
+                                }
+                            } catch (NumberFormatException e) {
+                            }
+                            if (codeStr != null) {
+                                andCode = Boolean.parseBoolean(codeStr);
+                            }
+                            addPackageToCleanLPw(new PackageCleanItem(userId, name, andCode));
+                        }
+                    } else if (tagName.equals("renamed-package")) {                     // <renamed-package>
+                        String nname = parser.getAttributeValue(null, "new");
+                        String oname = parser.getAttributeValue(null, "old");
+                        if (nname != null && oname != null) {
+                            mRenamedPackages.put(nname, oname);
+                        }
+                    } else if (tagName.equals("restored-ivi")) {                        // <restored-ivi>
+                        readRestoredIntentFilterVerifications(parser);
+                    } else if (tagName.equals("last-platform-version")) {               // <last-platform-version>
+                        // Upgrade from older XML schema
+                        final VersionInfo internal = findOrCreateVersion(StorageManager.UUID_PRIVATE_INTERNAL);
+                        final VersionInfo external = findOrCreateVersion(StorageManager.UUID_PRIMARY_PHYSICAL);
+
+                        internal.sdkVersion = XmlUtils.readIntAttribute(parser, "internal", 0);
+                        external.sdkVersion = XmlUtils.readIntAttribute(parser, "external", 0);
+                        internal.fingerprint = external.fingerprint = XmlUtils.readStringAttribute(parser, "fingerprint");
+
+                    } else if (tagName.equals("database-version")) {                    // <database-version>
+                        // Upgrade from older XML schema
+                        final VersionInfo internal = findOrCreateVersion(StorageManager.UUID_PRIVATE_INTERNAL);
+                        final VersionInfo external = findOrCreateVersion(StorageManager.UUID_PRIMARY_PHYSICAL);
+
+                        internal.databaseVersion = XmlUtils.readIntAttribute(parser, "internal", 0);
+                        external.databaseVersion = XmlUtils.readIntAttribute(parser, "external", 0);
+
+                    } else if (tagName.equals("verifier")) {                            // <verifier>
+                        final String deviceIdentity = parser.getAttributeValue(null, "device");
+                        try {
+                            mVerifierDeviceIdentity = VerifierDeviceIdentity.parse(deviceIdentity);
+                        } catch (IllegalArgumentException e) {
+                            Slog.w(PackageManagerService.TAG, "Discard invalid verifier device id: " + e.getMessage());
+                        }
+                    } else if (TAG_READ_EXTERNAL_STORAGE.equals(tagName)) {             // <read-external-storage>
+                        final String enforcement = parser.getAttributeValue(null, ATTR_ENFORCEMENT);
+                        mReadExternalStorageEnforced = "1".equals(enforcement) ? Boolean.TRUE : Boolean.FALSE;
+                    } else if (tagName.equals("keyset-settings")) {                     // <keyset-settings>
+                        mKeySetManagerService.readKeySetsLPw(parser, mKeySetRefs);
+                    } else if (TAG_VERSION.equals(tagName)) {                           // <version>
+                        final String volumeUuid = XmlUtils.readStringAttribute(parser, ATTR_VOLUME_UUID);
+                        final VersionInfo ver = findOrCreateVersion(volumeUuid);
+                        ver.sdkVersion = XmlUtils.readIntAttribute(parser, ATTR_SDK_VERSION);
+                        ver.databaseVersion = XmlUtils.readIntAttribute(parser, ATTR_DATABASE_VERSION);
+                        ver.fingerprint = XmlUtils.readStringAttribute(parser, ATTR_FINGERPRINT);
+                    } else {
+                        Slog.w(PackageManagerService.TAG, "Unknown element under <packages>: " + parser.getName());
+                        XmlUtils.skipCurrentTag(parser);
+                    }
+                }
+
+                str.close();
+
+            } catch (XmlPullParserException e) {
+            } catch (java.io.IOException e) {
+            }
+
+            if (PackageManagerService.CLEAR_RUNTIME_PERMISSIONS_ON_UPGRADE) {
+                final VersionInfo internal = getInternalVersion();
+                if (!Build.FINGERPRINT.equals(internal.fingerprint)) {
+                    for (UserInfo user : users) {
+                        mRuntimePermissionsPersistence.deleteUserRuntimePermissionsFile(user.id);
+                    }
+                }
+            }
+
+            final int N = mPendingPackages.size();
+            for (int i = 0; i < N; i++) {
+                final PackageSetting p = mPendingPackages.get(i);
+                final int sharedUserId = p.getSharedUserId();
+                final Object idObj = getUserIdLPr(sharedUserId);
+                if (idObj instanceof SharedUserSetting) {
+                    final SharedUserSetting sharedUser = (SharedUserSetting) idObj;
+                    p.sharedUser = sharedUser;
+                    p.appId = sharedUser.userId;
+                    addPackageSettingLPw(p, sharedUser);
+                } else if (idObj != null) {
+                    String msg = "Bad package setting: package " + p.name + " has shared uid " + sharedUserId + " that is not a shared uid\n";
+                    mReadMessages.append(msg);
+                    PackageManagerService.reportSettingsProblem(Log.ERROR, msg);
+                } else {
+                    String msg = "Bad package setting: package " + p.name + " has shared uid " + sharedUserId + " that is not defined\n";
+                    mReadMessages.append(msg);
+                    PackageManagerService.reportSettingsProblem(Log.ERROR, msg);
+                }
+            }
+            mPendingPackages.clear();
+
+            if (mBackupStoppedPackagesFilename.exists() || mStoppedPackagesFilename.exists()) {
+                readStoppedLPw();   // Read old file
+                mBackupStoppedPackagesFilename.delete();
+                mStoppedPackagesFilename.delete();
+                writePackageRestrictionsLPr(UserHandle.USER_SYSTEM);    // Migrate to new file format
+            } else {
+                for (UserInfo user : users) {
+                    readPackageRestrictionsLPr(user.id);
+                }
+            }
+
+            for (UserInfo user : users) {
+                mRuntimePermissionsPersistence.readStateForUserSyncLPr(user.id);
+            }
+
+            // Make sure all the updated system packages have their shared users
+            final Iterator<PackageSetting> disabledIt = mDisabledSysPackages.values().iterator();
+            while (disabledIt.hasNext()) {
+                final PackageSetting disabledPs = disabledIt.next();
+                final Object id = getUserIdLPr(disabledPs.appId);
+                if (id != null && id instanceof SharedUserSetting) {
+                    disabledPs.sharedUser = (SharedUserSetting) id;
+                }
+            }
+            mReadMessages.append("Read completed successfully: " + mPackages.size() + " packages, " + mSharedUsers.size() + " shared uids\n");
+            writeKernelMappingLPr();
+            return true;
+        }
+
+
+
+11.1.2 服务的初始化过程
+    理解了 Settings 类之后, 我们开始分析 PMS 的初始化过程.
+
+    PMS 也是在 SystemServer 中开始初始化的, 代码如下:
+        private void startBootstrapServices() {
+            mPackageManagerService = PackageManagerService.main(mSystemContext, installer, mFactoryTestMode != FactoryTest.FACTORY_TEST_OFF, mOnlyCore);
+            mFirstBoot = mPackageManagerService.isFirstBoot();
+            mPackageManager = mSystemContext.getPackageManager();
+            if (!mOnlyCore) {
+                boolean disableOtaDexopt = SystemProperties.getBoolean("config.disable_otadexopt", false);
+                if (!disableOtaDexopt) {
+                    OtaDexoptService.main(mSystemContext, mPackageManagerService);
+                }
+            }
+        }
+
+    下面看 PMS 的 main() 函数实现代码:
+        public static PackageManagerService main(Context context, Installer installer, boolean factoryTest, boolean onlyCore) {
+            PackageManagerServiceCompilerMapping.checkProperties();     // Self-check for initial settings.
+            PackageManagerService m = new PackageManagerService(context, installer, factoryTest, onlyCore); // 创建 PackageManagerService 对象
+            m.enableSystemUserPackages();
+            ServiceManager.addService("package", m);        // 注册到 ServiceManager 中
+            final PackageManagerNative pmn = m.new PackageManagerNative();
+            ServiceManager.addService("package_native", pmn);
+            return m;
+        }
+
+    PMS 的构造函数代码很长, 因为系统启动时要处理很多目录和文件, 理解这个过程会加深对Android 系统的了解, 因为处理过程中涉及我们平时经常接触,
+    但是对于它们的生成和移除的时间点和过程可能不是很清楚, 如果能耐心读完注释和代码, 一定会有收获.
+
+    PMS 的构造函数主要完成下列两件事:
+        第一件是把系统中的 apk 文件 和 jar 包从 dex 格式转换成 ART 的 oat 格式;
+        第二件事是扫描系统中所有安装的应用, 把它们的信息提取出来.
+
+    下面看 PMS 的构造函数代码实现:
+        public PackageManagerService(Context context, Installer installer, boolean factoryTest, boolean onlyCore) {
+            LockGuard.installLock(mPackages, LockGuard.INDEX_PACKAGES);
+            Trace.traceBegin(TRACE_TAG_PACKAGE_MANAGER, "create package manager");
+            EventLog.writeEvent(EventLogTags.BOOT_PROGRESS_PMS_START, SystemClock.uptimeMillis());
+
+            if (mSdkVersion <= 0) {
+                Slog.w(TAG, "**** ro.build.version.sdk not set!");
+            }
+
+            mContext = context;
+
+            mFactoryTest = factoryTest;
+            mOnlyCore = onlyCore;
+            mMetrics = new DisplayMetrics();
+            mInstaller = installer;
+
+            // Create sub-components that provide services / data. Order here is important.
+            synchronized (mInstallLock) {
+            synchronized (mPackages) {
+                // Expose private service for system components to use.
+                LocalServices.addService(
+                        PackageManagerInternal.class, new PackageManagerInternalImpl());
+                sUserManager = new UserManagerService(context, this, new UserDataPreparer(mInstaller, mInstallLock, mContext, mOnlyCore), mPackages);
+                mPermissionManager = PermissionManagerService.create(context,
+                        new DefaultPermissionGrantedCallback() {
+                            @Override
+                            public void onDefaultRuntimePermissionsGranted(int userId) {
+                                synchronized(mPackages) {
+                                    mSettings.onDefaultRuntimePermissionsGrantedLPr(userId);
+                                }
+                            }
+                        }, mPackages /*externalLock*/);
+                mDefaultPermissionPolicy = mPermissionManager.getDefaultPermissionGrantPolicy();
+                mSettings = new Settings(mPermissionManager.getPermissionSettings(), mPackages);
+            }
+            }
+            mSettings.addSharedUserLPw("android.uid.system", Process.SYSTEM_UID,
+                    ApplicationInfo.FLAG_SYSTEM, ApplicationInfo.PRIVATE_FLAG_PRIVILEGED);
+            mSettings.addSharedUserLPw("android.uid.phone", RADIO_UID,
+                    ApplicationInfo.FLAG_SYSTEM, ApplicationInfo.PRIVATE_FLAG_PRIVILEGED);
+            mSettings.addSharedUserLPw("android.uid.log", LOG_UID,
+                    ApplicationInfo.FLAG_SYSTEM, ApplicationInfo.PRIVATE_FLAG_PRIVILEGED);
+            mSettings.addSharedUserLPw("android.uid.nfc", NFC_UID,
+                    ApplicationInfo.FLAG_SYSTEM, ApplicationInfo.PRIVATE_FLAG_PRIVILEGED);
+            mSettings.addSharedUserLPw("android.uid.bluetooth", BLUETOOTH_UID,
+                    ApplicationInfo.FLAG_SYSTEM, ApplicationInfo.PRIVATE_FLAG_PRIVILEGED);
+            mSettings.addSharedUserLPw("android.uid.shell", SHELL_UID,
+                    ApplicationInfo.FLAG_SYSTEM, ApplicationInfo.PRIVATE_FLAG_PRIVILEGED);
+            mSettings.addSharedUserLPw("android.uid.se", SE_UID,
+                    ApplicationInfo.FLAG_SYSTEM, ApplicationInfo.PRIVATE_FLAG_PRIVILEGED);
+
+            String separateProcesses = SystemProperties.get("debug.separate_processes");
+            if (separateProcesses != null && separateProcesses.length() > 0) {
+                if ("*".equals(separateProcesses)) {
+                    mDefParseFlags = PackageParser.PARSE_IGNORE_PROCESSES;
+                    mSeparateProcesses = null;
+                    Slog.w(TAG, "Running with debug.separate_processes: * (ALL)");
+                } else {
+                    mDefParseFlags = 0;
+                    mSeparateProcesses = separateProcesses.split(",");
+                    Slog.w(TAG, "Running with debug.separate_processes: "
+                            + separateProcesses);
+                }
+            } else {
+                mDefParseFlags = 0;
+                mSeparateProcesses = null;
+            }
+
+            mPackageDexOptimizer = new PackageDexOptimizer(installer, mInstallLock, context,
+                    "*dexopt*");
+            DexManager.Listener dexManagerListener = DexLogger.getListener(this,
+                    installer, mInstallLock);
+            mDexManager = new DexManager(mContext, this, mPackageDexOptimizer, installer, mInstallLock,
+                    dexManagerListener);
+            mArtManagerService = new ArtManagerService(mContext, this, installer, mInstallLock);
+            mMoveCallbacks = new MoveCallbacks(FgThread.get().getLooper());
+
+            mOnPermissionChangeListeners = new OnPermissionChangeListeners(
+                    FgThread.get().getLooper());
+
+            getDefaultDisplayMetrics(context, mMetrics);
+
+            Trace.traceBegin(TRACE_TAG_PACKAGE_MANAGER, "get system config");
+            SystemConfig systemConfig = SystemConfig.getInstance();
+            mAvailableFeatures = systemConfig.getAvailableFeatures();
+            Trace.traceEnd(TRACE_TAG_PACKAGE_MANAGER);
+
+            mProtectedPackages = new ProtectedPackages(mContext);
+
+            synchronized (mInstallLock) {
+            // writer
+            synchronized (mPackages) {
+                mHandlerThread = new ServiceThread(TAG,
+                        Process.THREAD_PRIORITY_BACKGROUND, true /*allowIo*/);
+                mHandlerThread.start();
+                mHandler = new PackageHandler(mHandlerThread.getLooper());
+                mProcessLoggingHandler = new ProcessLoggingHandler();
+                Watchdog.getInstance().addThread(mHandler, WATCHDOG_TIMEOUT);
+                mInstantAppRegistry = new InstantAppRegistry(this);
+
+                ArrayMap<String, String> libConfig = systemConfig.getSharedLibraries();
+                final int builtInLibCount = libConfig.size();
+                for (int i = 0; i < builtInLibCount; i++) {
+                    String name = libConfig.keyAt(i);
+                    String path = libConfig.valueAt(i);
+                    addSharedLibraryLPw(path, null, name, SharedLibraryInfo.VERSION_UNDEFINED,
+                            SharedLibraryInfo.TYPE_BUILTIN, PLATFORM_PACKAGE_NAME, 0);
+                }
+
+                SELinuxMMAC.readInstallPolicy();
+
+                Trace.traceBegin(TRACE_TAG_PACKAGE_MANAGER, "loadFallbacks");
+                FallbackCategoryProvider.loadFallbacks();
+                Trace.traceEnd(TRACE_TAG_PACKAGE_MANAGER);
+
+                Trace.traceBegin(TRACE_TAG_PACKAGE_MANAGER, "read user settings");
+                mFirstBoot = !mSettings.readLPw(sUserManager.getUsers(false));
+                Trace.traceEnd(TRACE_TAG_PACKAGE_MANAGER);
+
+                // Clean up orphaned packages for which the code path doesn't exist
+                // and they are an update to a system app - caused by bug/32321269
+                final int packageSettingCount = mSettings.mPackages.size();
+                for (int i = packageSettingCount - 1; i >= 0; i--) {
+                    PackageSetting ps = mSettings.mPackages.valueAt(i);
+                    if (!isExternal(ps) && (ps.codePath == null || !ps.codePath.exists())
+                            && mSettings.getDisabledSystemPkgLPr(ps.name) != null) {
+                        mSettings.mPackages.removeAt(i);
+                        mSettings.enableSystemPackageLPw(ps.name);
+                    }
+                }
+
+                if (mFirstBoot) {
+                    requestCopyPreoptedFiles();
+                }
+
+                String customResolverActivity = Resources.getSystem().getString(R.string.config_customResolverActivity);
+                if (TextUtils.isEmpty(customResolverActivity)) {
+                    customResolverActivity = null;
+                } else {
+                    mCustomResolverComponentName = ComponentName.unflattenFromString(customResolverActivity);
+                }
+
+                long startTime = SystemClock.uptimeMillis();
+
+                EventLog.writeEvent(EventLogTags.BOOT_PROGRESS_PMS_SYSTEM_SCAN_START, startTime);
+
+                final String bootClassPath = System.getenv("BOOTCLASSPATH");
+                final String systemServerClassPath = System.getenv("SYSTEMSERVERCLASSPATH");
+
+                if (bootClassPath == null) {
+                    Slog.w(TAG, "No BOOTCLASSPATH found!");
+                }
+
+                if (systemServerClassPath == null) {
+                    Slog.w(TAG, "No SYSTEMSERVERCLASSPATH found!");
+                }
+
+                File frameworkDir = new File(Environment.getRootDirectory(), "framework");
+
+                final VersionInfo ver = mSettings.getInternalVersion();
+                mIsUpgrade = !Build.FINGERPRINT.equals(ver.fingerprint);
+                if (mIsUpgrade) {
+                    logCriticalInfo(Log.INFO,
+                            "Upgrading from " + ver.fingerprint + " to " + Build.FINGERPRINT);
+                }
+
+                // when upgrading from pre-M, promote system app permissions from install to runtime
+                mPromoteSystemApps =
+                        mIsUpgrade && ver.sdkVersion <= Build.VERSION_CODES.LOLLIPOP_MR1;
+
+                // When upgrading from pre-N, we need to handle package extraction like first boot,
+                // as there is no profiling data available.
+                mIsPreNUpgrade = mIsUpgrade && ver.sdkVersion < Build.VERSION_CODES.N;
+
+                mIsPreNMR1Upgrade = mIsUpgrade && ver.sdkVersion < Build.VERSION_CODES.N_MR1;
+
+                // save off the names of pre-existing system packages prior to scanning; we don't
+                // want to automatically grant runtime permissions for new system apps
+                if (mPromoteSystemApps) {
+                    Iterator<PackageSetting> pkgSettingIter = mSettings.mPackages.values().iterator();
+                    while (pkgSettingIter.hasNext()) {
+                        PackageSetting ps = pkgSettingIter.next();
+                        if (isSystemApp(ps)) {
+                            mExistingSystemPackages.add(ps.name);
+                        }
+                    }
+                }
+
+                mCacheDir = preparePackageParserCache(mIsUpgrade);
+
+                // Set flag to monitor and not change apk file paths when
+                // scanning install directories.
+                int scanFlags = SCAN_BOOTING | SCAN_INITIAL;
+
+                if (mIsUpgrade || mFirstBoot) {
+                    scanFlags = scanFlags | SCAN_FIRST_BOOT_OR_UPGRADE;
+                }
+
+                // 调用 scanDirLI() 函数来扫描某个目录下的 APK 文件
+                scanDirTracedLI(new File(VENDOR_OVERLAY_DIR),
+                        mDefParseFlags
+                        | PackageParser.PARSE_IS_SYSTEM_DIR,
+                        scanFlags
+                        | SCAN_AS_SYSTEM
+                        | SCAN_AS_VENDOR,
+                        0);
+                // 调用 scanDirLI() 函数来扫描某个目录下的 APK 文件
+                scanDirTracedLI(new File(PRODUCT_OVERLAY_DIR),
+                        mDefParseFlags
+                        | PackageParser.PARSE_IS_SYSTEM_DIR,
+                        scanFlags
+                        | SCAN_AS_SYSTEM
+                        | SCAN_AS_PRODUCT,
+                        0);
+
+                mParallelPackageParserCallback.findStaticOverlayPackages();
+
+                // 调用 scanDirLI() 函数来扫描某个目录下的 APK 文件
+                scanDirTracedLI(frameworkDir,
+                        mDefParseFlags
+                        | PackageParser.PARSE_IS_SYSTEM_DIR,
+                        scanFlags
+                        | SCAN_NO_DEX
+                        | SCAN_AS_SYSTEM
+                        | SCAN_AS_PRIVILEGED,
+                        0);
+
+                // 调用 scanDirLI() 函数来扫描某个目录下的 APK 文件
+                final File privilegedAppDir = new File(Environment.getRootDirectory(), "priv-app");
+                scanDirTracedLI(privilegedAppDir,
+                        mDefParseFlags
+                        | PackageParser.PARSE_IS_SYSTEM_DIR,
+                        scanFlags
+                        | SCAN_AS_SYSTEM
+                        | SCAN_AS_PRIVILEGED,
+                        0);
+
+                // 调用 scanDirLI() 函数来扫描某个目录下的 APK 文件
+                final File systemAppDir = new File(Environment.getRootDirectory(), "app");
+                scanDirTracedLI(systemAppDir,
+                        mDefParseFlags
+                        | PackageParser.PARSE_IS_SYSTEM_DIR,
+                        scanFlags
+                        | SCAN_AS_SYSTEM,
+                        0);
+
+                // Collect privileged vendor packages.
+                File privilegedVendorAppDir = new File(Environment.getVendorDirectory(), "priv-app");
+                try {
+                    privilegedVendorAppDir = privilegedVendorAppDir.getCanonicalFile();
+                } catch (IOException e) {
+                    // failed to look up canonical path, continue with original one
+                }
+                // 调用 scanDirLI() 函数来扫描某个目录下的 APK 文件
+                scanDirTracedLI(privilegedVendorAppDir,
+                        mDefParseFlags
+                        | PackageParser.PARSE_IS_SYSTEM_DIR,
+                        scanFlags
+                        | SCAN_AS_SYSTEM
+                        | SCAN_AS_VENDOR
+                        | SCAN_AS_PRIVILEGED,
+                        0);
+
+                // Collect ordinary vendor packages.
+                File vendorAppDir = new File(Environment.getVendorDirectory(), "app");
+                try {
+                    vendorAppDir = vendorAppDir.getCanonicalFile();
+                } catch (IOException e) {
+                    // failed to look up canonical path, continue with original one
+                }
+                // 调用 scanDirLI() 函数来扫描某个目录下的 APK 文件
+                scanDirTracedLI(vendorAppDir,
+                        mDefParseFlags
+                        | PackageParser.PARSE_IS_SYSTEM_DIR,
+                        scanFlags
+                        | SCAN_AS_SYSTEM
+                        | SCAN_AS_VENDOR,
+                        0);
+
+                // Collect privileged odm packages. /odm is another vendor partition
+                // other than /vendor.
+                File privilegedOdmAppDir = new File(Environment.getOdmDirectory(),
+                            "priv-app");
+                try {
+                    privilegedOdmAppDir = privilegedOdmAppDir.getCanonicalFile();
+                } catch (IOException e) {
+                    // failed to look up canonical path, continue with original one
+                }
+                // 调用 scanDirLI() 函数来扫描某个目录下的 APK 文件
+                scanDirTracedLI(privilegedOdmAppDir,
+                        mDefParseFlags
+                        | PackageParser.PARSE_IS_SYSTEM_DIR,
+                        scanFlags
+                        | SCAN_AS_SYSTEM
+                        | SCAN_AS_VENDOR
+                        | SCAN_AS_PRIVILEGED,
+                        0);
+
+                // Collect ordinary odm packages. /odm is another vendor partition
+                // other than /vendor.
+                File odmAppDir = new File(Environment.getOdmDirectory(), "app");
+                try {
+                    odmAppDir = odmAppDir.getCanonicalFile();
+                } catch (IOException e) {
+                    // failed to look up canonical path, continue with original one
+                }
+                // 调用 scanDirLI() 函数来扫描某个目录下的 APK 文件
+                scanDirTracedLI(odmAppDir,
+                        mDefParseFlags
+                        | PackageParser.PARSE_IS_SYSTEM_DIR,
+                        scanFlags
+                        | SCAN_AS_SYSTEM
+                        | SCAN_AS_VENDOR,
+                        0);
+
+                // 调用 scanDirLI() 函数来扫描某个目录下的 APK 文件
+                final File oemAppDir = new File(Environment.getOemDirectory(), "app");
+                scanDirTracedLI(oemAppDir,
+                        mDefParseFlags
+                        | PackageParser.PARSE_IS_SYSTEM_DIR,
+                        scanFlags
+                        | SCAN_AS_SYSTEM
+                        | SCAN_AS_OEM,
+                        0);
+
+                // Collected privileged product packages.
+                File privilegedProductAppDir = new File(Environment.getProductDirectory(), "priv-app");
+                try {
+                    privilegedProductAppDir = privilegedProductAppDir.getCanonicalFile();
+                } catch (IOException e) {
+                    // failed to look up canonical path, continue with original one
+                }
+                // 调用 scanDirLI() 函数来扫描某个目录下的 APK 文件
+                scanDirTracedLI(privilegedProductAppDir,
+                        mDefParseFlags
+                        | PackageParser.PARSE_IS_SYSTEM_DIR,
+                        scanFlags
+                        | SCAN_AS_SYSTEM
+                        | SCAN_AS_PRODUCT
+                        | SCAN_AS_PRIVILEGED,
+                        0);
+
+                // Collect ordinary product packages.
+                File productAppDir = new File(Environment.getProductDirectory(), "app");
+                try {
+                    productAppDir = productAppDir.getCanonicalFile();
+                } catch (IOException e) {
+                    // failed to look up canonical path, continue with original one
+                }
+                // 调用 scanDirLI() 函数来扫描某个目录下的 APK 文件
+                scanDirTracedLI(productAppDir,
+                        mDefParseFlags
+                        | PackageParser.PARSE_IS_SYSTEM_DIR,
+                        scanFlags
+                        | SCAN_AS_SYSTEM
+                        | SCAN_AS_PRODUCT,
+                        0);
+
+                // Prune any system packages that no longer exist.
+                final List<String> possiblyDeletedUpdatedSystemApps = new ArrayList<>();
+                // Stub packages must either be replaced with full versions in the /data
+                // partition or be disabled.
+                final List<String> stubSystemApps = new ArrayList<>();
+                if (!mOnlyCore) {
+                    // do this first before mucking with mPackages for the "expecting better" case
+                    final Iterator<PackageParser.Package> pkgIterator = mPackages.values().iterator();
+                    while (pkgIterator.hasNext()) {
+                        final PackageParser.Package pkg = pkgIterator.next();
+                        if (pkg.isStub) {
+                            stubSystemApps.add(pkg.packageName);
+                        }
+                    }
+
+                    final Iterator<PackageSetting> psit = mSettings.mPackages.values().iterator();
+                    while (psit.hasNext()) {
+                        PackageSetting ps = psit.next();
+
+                        /*
+                         * If this is not a system app, it can't be a
+                         * disable system app.
+                         */
+                        if ((ps.pkgFlags & ApplicationInfo.FLAG_SYSTEM) == 0) {
+                            continue;
+                        }
+
+                        /*
+                         * If the package is scanned, it's not erased.
+                         */
+                        final PackageParser.Package scannedPkg = mPackages.get(ps.name);
+                        if (scannedPkg != null) {
+                            /*
+                             * If the system app is both scanned and in the
+                             * disabled packages list, then it must have been
+                             * added via OTA. Remove it from the currently
+                             * scanned package so the previously user-installed
+                             * application can be scanned.
+                             */
+                            if (mSettings.isDisabledSystemPackageLPr(ps.name)) {
+                                logCriticalInfo(Log.WARN,
+                                        "Expecting better updated system app for " + ps.name
+                                        + "; removing system app.  Last known"
+                                        + " codePath=" + ps.codePathString
+                                        + ", versionCode=" + ps.versionCode
+                                        + "; scanned versionCode=" + scannedPkg.getLongVersionCode());
+                                removePackageLI(scannedPkg, true);
+                                mExpectingBetter.put(ps.name, ps.codePath);
+                            }
+
+                            continue;
+                        }
+
+                        if (!mSettings.isDisabledSystemPackageLPr(ps.name)) {
+                            psit.remove();
+                            logCriticalInfo(Log.WARN, "System package " + ps.name
+                                    + " no longer exists; it's data will be wiped");
+                            // Actual deletion of code and data will be handled by later
+                            // reconciliation step
+                        } else {
+                            // we still have a disabled system package, but, it still might have
+                            // been removed. check the code path still exists and check there's
+                            // still a package. the latter can happen if an OTA keeps the same
+                            // code path, but, changes the package name.
+                            final PackageSetting disabledPs =
+                                    mSettings.getDisabledSystemPkgLPr(ps.name);
+                            if (disabledPs.codePath == null || !disabledPs.codePath.exists()
+                                    || disabledPs.pkg == null) {
+                                possiblyDeletedUpdatedSystemApps.add(ps.name);
+                            }
+                        }
+                    }
+                }
+
+                //delete tmp files
+                deleteTempPackageFiles();
+
+                final int cachedSystemApps = PackageParser.sCachedPackageReadCount.get();
+
+                // Remove any shared userIDs that have no associated packages
+                mSettings.pruneSharedUsersLPw();
+                final long systemScanTime = SystemClock.uptimeMillis() - startTime;
+                final int systemPackagesCount = mPackages.size();
+                Slog.i(TAG, "Finished scanning system apps. Time: " + systemScanTime
+                        + " ms, packageCount: " + systemPackagesCount
+                        + " , timePerPackage: "
+                        + (systemPackagesCount == 0 ? 0 : systemScanTime / systemPackagesCount)
+                        + " , cached: " + cachedSystemApps);
+                if (mIsUpgrade && systemPackagesCount > 0) {
+                    MetricsLogger.histogram(null, "ota_package_manager_system_app_avg_scan_time",
+                            ((int) systemScanTime) / systemPackagesCount);
+                }
+                if (!mOnlyCore) {
+                    EventLog.writeEvent(EventLogTags.BOOT_PROGRESS_PMS_DATA_SCAN_START, SystemClock.uptimeMillis());
+                    scanDirTracedLI(sAppInstallDir, 0, scanFlags | SCAN_REQUIRE_KNOWN, 0);
+
+                    scanDirTracedLI(sDrmAppPrivateInstallDir, mDefParseFlags | PackageParser.PARSE_FORWARD_LOCK, scanFlags | SCAN_REQUIRE_KNOWN, 0);
+
+                    // Remove disable package settings for updated system apps that were
+                    // removed via an OTA. If the update is no longer present, remove the
+                    // app completely. Otherwise, revoke their system privileges.
+                    for (String deletedAppName : possiblyDeletedUpdatedSystemApps) {
+                        PackageParser.Package deletedPkg = mPackages.get(deletedAppName);
+                        mSettings.removeDisabledSystemPackageLPw(deletedAppName);
+                        final String msg;
+                        if (deletedPkg == null) {
+                            // should have found an update, but, we didn't; remove everything
+                            msg = "Updated system package " + deletedAppName
+                                    + " no longer exists; removing its data";
+                            // Actual deletion of code and data will be handled by later
+                            // reconciliation step
+                        } else {
+                            // found an update; revoke system privileges
+                            msg = "Updated system package + " + deletedAppName
+                                    + " no longer exists; revoking system privileges";
+
+                            // Don't do anything if a stub is removed from the system image. If
+                            // we were to remove the uncompressed version from the /data partition,
+                            // this is where it'd be done.
+
+                            final PackageSetting deletedPs = mSettings.mPackages.get(deletedAppName);
+                            deletedPkg.applicationInfo.flags &= ~ApplicationInfo.FLAG_SYSTEM;
+                            deletedPs.pkgFlags &= ~ApplicationInfo.FLAG_SYSTEM;
+                        }
+                        logCriticalInfo(Log.WARN, msg);
+                    }
+
+                    /*
+                     * Make sure all system apps that we expected to appear on
+                     * the userdata partition actually showed up. If they never
+                     * appeared, crawl back and revive the system version.
+                     */
+                    for (int i = 0; i < mExpectingBetter.size(); i++) {
+                        final String packageName = mExpectingBetter.keyAt(i);
+                        if (!mPackages.containsKey(packageName)) {
+                            final File scanFile = mExpectingBetter.valueAt(i);
+
+                            logCriticalInfo(Log.WARN, "Expected better " + packageName
+                                    + " but never showed up; reverting to system");
+
+                            final @ParseFlags int reparseFlags;
+                            final @ScanFlags int rescanFlags;
+                            if (FileUtils.contains(privilegedAppDir, scanFile)) {
+                                reparseFlags =
+                                        mDefParseFlags |
+                                        PackageParser.PARSE_IS_SYSTEM_DIR;
+                                rescanFlags =
+                                        scanFlags
+                                        | SCAN_AS_SYSTEM
+                                        | SCAN_AS_PRIVILEGED;
+                            } else if (FileUtils.contains(systemAppDir, scanFile)) {
+                                reparseFlags =
+                                        mDefParseFlags |
+                                        PackageParser.PARSE_IS_SYSTEM_DIR;
+                                rescanFlags =
+                                        scanFlags
+                                        | SCAN_AS_SYSTEM;
+                            } else if (FileUtils.contains(privilegedVendorAppDir, scanFile)
+                                    || FileUtils.contains(privilegedOdmAppDir, scanFile)) {
+                                reparseFlags =
+                                        mDefParseFlags |
+                                        PackageParser.PARSE_IS_SYSTEM_DIR;
+                                rescanFlags =
+                                        scanFlags
+                                        | SCAN_AS_SYSTEM
+                                        | SCAN_AS_VENDOR
+                                        | SCAN_AS_PRIVILEGED;
+                            } else if (FileUtils.contains(vendorAppDir, scanFile)
+                                    || FileUtils.contains(odmAppDir, scanFile)) {
+                                reparseFlags =
+                                        mDefParseFlags |
+                                        PackageParser.PARSE_IS_SYSTEM_DIR;
+                                rescanFlags =
+                                        scanFlags
+                                        | SCAN_AS_SYSTEM
+                                        | SCAN_AS_VENDOR;
+                            } else if (FileUtils.contains(oemAppDir, scanFile)) {
+                                reparseFlags =
+                                        mDefParseFlags |
+                                        PackageParser.PARSE_IS_SYSTEM_DIR;
+                                rescanFlags =
+                                        scanFlags
+                                        | SCAN_AS_SYSTEM
+                                        | SCAN_AS_OEM;
+                            } else if (FileUtils.contains(privilegedProductAppDir, scanFile)) {
+                                reparseFlags =
+                                        mDefParseFlags |
+                                        PackageParser.PARSE_IS_SYSTEM_DIR;
+                                rescanFlags =
+                                        scanFlags
+                                        | SCAN_AS_SYSTEM
+                                        | SCAN_AS_PRODUCT
+                                        | SCAN_AS_PRIVILEGED;
+                            } else if (FileUtils.contains(productAppDir, scanFile)) {
+                                reparseFlags =
+                                        mDefParseFlags |
+                                        PackageParser.PARSE_IS_SYSTEM_DIR;
+                                rescanFlags =
+                                        scanFlags
+                                        | SCAN_AS_SYSTEM
+                                        | SCAN_AS_PRODUCT;
+                            } else {
+                                Slog.e(TAG, "Ignoring unexpected fallback path " + scanFile);
+                                continue;
+                            }
+
+                            mSettings.enableSystemPackageLPw(packageName);
+
+                            try {
+                                scanPackageTracedLI(scanFile, reparseFlags, rescanFlags, 0, null);
+                            } catch (PackageManagerException e) {
+                                Slog.e(TAG, "Failed to parse original system package: "
+                                        + e.getMessage());
+                            }
+                        }
+                    }
+
+                    // Uncompress and install any stubbed system applications.
+                    // This must be done last to ensure all stubs are replaced or disabled.
+                    decompressSystemApplications(stubSystemApps, scanFlags);
+
+                    final int cachedNonSystemApps = PackageParser.sCachedPackageReadCount.get() - cachedSystemApps;
+
+                    final long dataScanTime = SystemClock.uptimeMillis() - systemScanTime - startTime;
+                    final int dataPackagesCount = mPackages.size() - systemPackagesCount;
+                    if (mIsUpgrade && dataPackagesCount > 0) {
+                        MetricsLogger.histogram(null, "ota_package_manager_data_app_avg_scan_time",
+                                ((int) dataScanTime) / dataPackagesCount);
+                    }
+                }
+                mExpectingBetter.clear();
+
+                // Resolve the storage manager.
+                mStorageManagerPackage = getStorageManagerPackageName();
+
+                // Resolve protected action filters. Only the setup wizard is allowed to
+                // have a high priority filter for these actions.
+                mSetupWizardPackage = getSetupWizardPackageName();
+                if (mProtectedFilters.size() > 0) {
+                    if (DEBUG_FILTERS && mSetupWizardPackage == null) {
+                        Slog.i(TAG, "No setup wizard;"
+                            + " All protected intents capped to priority 0");
+                    }
+                    for (ActivityIntentInfo filter : mProtectedFilters) {
+                        if (filter.activity.info.packageName.equals(mSetupWizardPackage)) {
+                            if (DEBUG_FILTERS) {
+                                Slog.i(TAG, "Found setup wizard;"
+                                    + " allow priority " + filter.getPriority() + ";"
+                                    + " package: " + filter.activity.info.packageName
+                                    + " activity: " + filter.activity.className
+                                    + " priority: " + filter.getPriority());
+                            }
+                            // skip setup wizard; allow it to keep the high priority filter
+                            continue;
+                        }
+                        filter.setPriority(0);
+                    }
+                }
+
+                mSystemTextClassifierPackage = getSystemTextClassifierPackageName();
+
+                mDeferProtectedFilters = false;
+                mProtectedFilters.clear();
+
+                // Now that we know all of the shared libraries, update all clients to have
+                // the correct library paths.
+                updateAllSharedLibrariesLPw(null);
+
+                for (SharedUserSetting setting : mSettings.getAllSharedUsersLPw()) {
+                    // NOTE: We ignore potential failures here during a system scan (like
+                    // the rest of the commands above) because there's precious little we
+                    // can do about it. A settings error is reported, though.
+                    final List<String> changedAbiCodePath = adjustCpuAbisForSharedUserLPw(setting.packages, null /*scannedPackage*/);
+                    if (changedAbiCodePath != null && changedAbiCodePath.size() > 0) {
+                        for (int i = changedAbiCodePath.size() - 1; i >= 0; --i) {
+                            final String codePathString = changedAbiCodePath.get(i);
+                            try {
+                                mInstaller.rmdex(codePathString, getDexCodeInstructionSet(getPreferredInstructionSet()));
+                            } catch (InstallerException ignored) {
+                            }
+                        }
+                    }
+                    // Adjust seInfo to ensure apps which share a sharedUserId are placed in the same
+                    // SELinux domain.
+                    setting.fixSeInfoLocked();
+                }
+
+                // Now that we know all the packages we are keeping,
+                // read and update their last usage times.
+                mPackageUsage.read(mPackages);
+                mCompilerStats.read();
+
+                EventLog.writeEvent(EventLogTags.BOOT_PROGRESS_PMS_SCAN_END,
+                        SystemClock.uptimeMillis());
+                Slog.i(TAG, "Time to scan packages: "
+                        + ((SystemClock.uptimeMillis()-startTime)/1000f)
+                        + " seconds");
+
+                // If the platform SDK has changed since the last time we booted,
+                // we need to re-grant app permission to catch any new ones that
+                // appear.  This is really a hack, and means that apps can in some
+                // cases get permissions that the user didn't initially explicitly
+                // allow...  it would be nice to have some better way to handle
+                // this situation.
+                final boolean sdkUpdated = (ver.sdkVersion != mSdkVersion);
+                if (sdkUpdated) {
+                    Slog.i(TAG, "Platform changed from " + ver.sdkVersion + " to "
+                            + mSdkVersion + "; regranting permissions for internal storage");
+                }
+                mPermissionManager.updateAllPermissions(
+                        StorageManager.UUID_PRIVATE_INTERNAL, sdkUpdated, mPackages.values(),
+                        mPermissionCallback);
+                ver.sdkVersion = mSdkVersion;
+
+                // If this is the first boot or an update from pre-M, and it is a normal
+                // boot, then we need to initialize the default preferred apps across
+                // all defined users.
+                if (!onlyCore && (mPromoteSystemApps || mFirstBoot)) {
+                    for (UserInfo user : sUserManager.getUsers(true)) {
+                        mSettings.applyDefaultPreferredAppsLPw(this, user.id);
+                        applyFactoryDefaultBrowserLPw(user.id);
+                        primeDomainVerificationsLPw(user.id);
+                    }
+                }
+
+                // Prepare storage for system user really early during boot,
+                // since core system apps like SettingsProvider and SystemUI
+                // can't wait for user to start
+                final int storageFlags;
+                if (StorageManager.isFileEncryptedNativeOrEmulated()) {
+                    storageFlags = StorageManager.FLAG_STORAGE_DE;
+                } else {
+                    storageFlags = StorageManager.FLAG_STORAGE_DE | StorageManager.FLAG_STORAGE_CE;
+                }
+                List<String> deferPackages = reconcileAppsDataLI(StorageManager.UUID_PRIVATE_INTERNAL,
+                        UserHandle.USER_SYSTEM, storageFlags, true /* migrateAppData */,
+                        true /* onlyCoreApps */);
+                mPrepareAppDataFuture = SystemServerInitThreadPool.get().submit(() -> {
+                    TimingsTraceLog traceLog = new TimingsTraceLog("SystemServerTimingAsync",
+                            Trace.TRACE_TAG_PACKAGE_MANAGER);
+                    traceLog.traceBegin("AppDataFixup");
+                    try {
+                        mInstaller.fixupAppData(StorageManager.UUID_PRIVATE_INTERNAL,
+                                StorageManager.FLAG_STORAGE_DE | StorageManager.FLAG_STORAGE_CE);
+                    } catch (InstallerException e) {
+                        Slog.w(TAG, "Trouble fixing GIDs", e);
+                    }
+                    traceLog.traceEnd();
+
+                    traceLog.traceBegin("AppDataPrepare");
+                    if (deferPackages == null || deferPackages.isEmpty()) {
+                        return;
+                    }
+                    int count = 0;
+                    for (String pkgName : deferPackages) {
+                        PackageParser.Package pkg = null;
+                        synchronized (mPackages) {
+                            PackageSetting ps = mSettings.getPackageLPr(pkgName);
+                            if (ps != null && ps.getInstalled(UserHandle.USER_SYSTEM)) {
+                                pkg = ps.pkg;
+                            }
+                        }
+                        if (pkg != null) {
+                            synchronized (mInstallLock) {
+                                prepareAppDataAndMigrateLIF(pkg, UserHandle.USER_SYSTEM, storageFlags,
+                                        true /* maybeMigrateAppData */);
+                            }
+                            count++;
+                        }
+                    }
+                    traceLog.traceEnd();
+                    Slog.i(TAG, "Deferred reconcileAppsData finished " + count + " packages");
+                }, "prepareAppData");
+
+                // If this is first boot after an OTA, and a normal boot, then
+                // we need to clear code cache directories.
+                // Note that we do *not* clear the application profiles. These remain valid
+                // across OTAs and are used to drive profile verification (post OTA) and
+                // profile compilation (without waiting to collect a fresh set of profiles).
+                if (mIsUpgrade && !onlyCore) {
+                    Slog.i(TAG, "Build fingerprint changed; clearing code caches");
+                    for (int i = 0; i < mSettings.mPackages.size(); i++) {
+                        final PackageSetting ps = mSettings.mPackages.valueAt(i);
+                        if (Objects.equals(StorageManager.UUID_PRIVATE_INTERNAL, ps.volumeUuid)) {
+                            // No apps are running this early, so no need to freeze
+                            clearAppDataLIF(ps.pkg, UserHandle.USER_ALL,
+                                    StorageManager.FLAG_STORAGE_DE | StorageManager.FLAG_STORAGE_CE
+                                            | Installer.FLAG_CLEAR_CODE_CACHE_ONLY);
+                        }
+                    }
+                    ver.fingerprint = Build.FINGERPRINT;
+                }
+
+                checkDefaultBrowser();
+
+                // clear only after permissions and other defaults have been updated
+                mExistingSystemPackages.clear();
+                mPromoteSystemApps = false;
+
+                // All the changes are done during package scanning.
+                ver.databaseVersion = Settings.CURRENT_DATABASE_VERSION;
+
+                // can downgrade to reader
+                Trace.traceBegin(TRACE_TAG_PACKAGE_MANAGER, "write settings");
+                mSettings.writeLPr();
+                Trace.traceEnd(TRACE_TAG_PACKAGE_MANAGER);
+                EventLog.writeEvent(EventLogTags.BOOT_PROGRESS_PMS_READY,
+                        SystemClock.uptimeMillis());
+
+                if (!mOnlyCore) {
+                    mRequiredVerifierPackage = getRequiredButNotReallyRequiredVerifierLPr();
+                    mRequiredInstallerPackage = getRequiredInstallerLPr();
+                    mRequiredUninstallerPackage = getRequiredUninstallerLPr();
+                    mIntentFilterVerifierComponent = getIntentFilterVerifierComponentNameLPr();
+                    if (mIntentFilterVerifierComponent != null) {
+                        mIntentFilterVerifier = new IntentVerifierProxy(mContext,
+                                mIntentFilterVerifierComponent);
+                    } else {
+                        mIntentFilterVerifier = null;
+                    }
+                    mServicesSystemSharedLibraryPackageName = getRequiredSharedLibraryLPr(
+                            PackageManager.SYSTEM_SHARED_LIBRARY_SERVICES,
+                            SharedLibraryInfo.VERSION_UNDEFINED);
+                    mSharedSystemSharedLibraryPackageName = getRequiredSharedLibraryLPr(
+                            PackageManager.SYSTEM_SHARED_LIBRARY_SHARED,
+                            SharedLibraryInfo.VERSION_UNDEFINED);
+                } else {
+                    mRequiredVerifierPackage = null;
+                    mRequiredInstallerPackage = null;
+                    mRequiredUninstallerPackage = null;
+                    mIntentFilterVerifierComponent = null;
+                    mIntentFilterVerifier = null;
+                    mServicesSystemSharedLibraryPackageName = null;
+                    mSharedSystemSharedLibraryPackageName = null;
+                }
+
+                mInstallerService = new PackageInstallerService(context, this);
+                final Pair<ComponentName, String> instantAppResolverComponent =
+                        getInstantAppResolverLPr();
+                if (instantAppResolverComponent != null) {
+                    if (DEBUG_INSTANT) {
+                        Slog.d(TAG, "Set ephemeral resolver: " + instantAppResolverComponent);
+                    }
+                    mInstantAppResolverConnection = new InstantAppResolverConnection(
+                            mContext, instantAppResolverComponent.first,
+                            instantAppResolverComponent.second);
+                    mInstantAppResolverSettingsComponent =
+                            getInstantAppResolverSettingsLPr(instantAppResolverComponent.first);
+                } else {
+                    mInstantAppResolverConnection = null;
+                    mInstantAppResolverSettingsComponent = null;
+                }
+                updateInstantAppInstallerLocked(null);
+
+                // Read and update the usage of dex files.
+                // Do this at the end of PM init so that all the packages have their
+                // data directory reconciled.
+                // At this point we know the code paths of the packages, so we can validate
+                // the disk file and build the internal cache.
+                // The usage file is expected to be small so loading and verifying it
+                // should take a fairly small time compare to the other activities (e.g. package
+                // scanning).
+                final Map<Integer, List<PackageInfo>> userPackages = new HashMap<>();
+                final int[] currentUserIds = UserManagerService.getInstance().getUserIds();
+                for (int userId : currentUserIds) {
+                    userPackages.put(userId, getInstalledPackages(/*flags*/ 0, userId).getList());
+                }
+                mDexManager.load(userPackages);
+                if (mIsUpgrade) {
+                    MetricsLogger.histogram(null, "ota_package_manager_init_time",
+                            (int) (SystemClock.uptimeMillis() - startTime));
+                }
+            } // synchronized (mPackages)
+            } // synchronized (mInstallLock)
+
+            // Now after opening every single application zip, make sure they
+            // are all flushed.  Not really needed, but keeps things nice and
+            // tidy.
+            Trace.traceBegin(TRACE_TAG_PACKAGE_MANAGER, "GC");
+            Runtime.getRuntime().gc();
+            Trace.traceEnd(TRACE_TAG_PACKAGE_MANAGER);
+
+            // The initial scanning above does many calls into installd while
+            // holding the mPackages lock, but we're mostly interested in yelling
+            // once we have a booted system.
+            mInstaller.setWarnIfHeld(mPackages);
+
+            Trace.traceEnd(TRACE_TAG_PACKAGE_MANAGER);
+        }
+
+11.1.3 处理 permission 文件
+    在 PMS 的构造方法中, 有如下代码:
+        mPermissionManager = PermissionManagerService.create(context,   // 创建 PermissionManagerService 对象
+                new DefaultPermissionGrantedCallback() {
+                    @Override
+                    public void onDefaultRuntimePermissionsGranted(int userId) {
+                        synchronized(mPackages) {
+                            mSettings.onDefaultRuntimePermissionsGrantedLPr(userId);
+                        }
+                    }
+                }, mPackages /*externalLock*/);
+        mDefaultPermissionPolicy = mPermissionManager.getDefaultPermissionGrantPolicy();
+        mSettings = new Settings(mPermissionManager.getPermissionSettings(), mPackages);    // 创建 Settings 对象
+
+    下面请看 PermissionManagerService 中的静态方法 create() 函数代码:
+        public static PermissionManagerInternal create(Context context, @Nullable DefaultPermissionGrantedCallback defaultGrantCallback, @NonNull Object externalLock) {
+            final PermissionManagerInternal permMgrInt = LocalServices.getService(PermissionManagerInternal.class);
+            if (permMgrInt != null) {
+                return permMgrInt;
+            }
+            new PermissionManagerService(context, defaultGrantCallback, externalLock);  // 创建 PermissionManagerService 对象
+            return LocalServices.getService(PermissionManagerInternal.class);
+        }
+
+    下面看 PermissionManagerService 的构造方法:
+        PermissionManagerService(Context context, @Nullable DefaultPermissionGrantedCallback defaultGrantCallback, @NonNull Object externalLock) {
+            mContext = context;
+            mLock = externalLock;
+            mPackageManagerInt = LocalServices.getService(PackageManagerInternal.class);
+            mUserManagerInt = LocalServices.getService(UserManagerInternal.class);
+            mSettings = new PermissionSettings(context, mLock);
+
+            mHandlerThread = new ServiceThread(TAG, Process.THREAD_PRIORITY_BACKGROUND, true /*allowIo*/);
+            mHandlerThread.start();
+            mHandler = new Handler(mHandlerThread.getLooper());
+            Watchdog.getInstance().addThread(mHandler);
+
+            mDefaultPermissionGrantPolicy = new DefaultPermissionGrantPolicy(context, mHandlerThread.getLooper(), defaultGrantCallback, this);
+            SystemConfig systemConfig = SystemConfig.getInstance();
+            mSystemPermissions = systemConfig.getSystemPermissions();   // 调用 SystemConfig 对象的 getSystemPermissions() 方法, 下面继续分析
+            mGlobalGids = systemConfig.getGlobalGids();
+
+            final ArrayMap<String, SystemConfig.PermissionEntry> permConfig = SystemConfig.getInstance().getPermissions();
+            synchronized (mLock) {
+                for (int i=0; i<permConfig.size(); i++) {
+                    final SystemConfig.PermissionEntry perm = permConfig.valueAt(i);
+                    BasePermission bp = mSettings.getPermissionLocked(perm.name);
+                    if (bp == null) {
+                        bp = new BasePermission(perm.name, "android", BasePermission.TYPE_BUILTIN);
+                        mSettings.putPermissionLocked(perm.name, bp);
+                    }
+                    if (perm.gids != null) {
+                        bp.setGids(perm.gids, perm.perUser);
+                    }
+                }
+            }
+            LocalServices.addService(PermissionManagerInternal.class, new PermissionManagerInternalImpl());
+        }
+
+    下面看 SystemConfig 类中的函数:
+        public static SystemConfig getInstance() {
+            synchronized (SystemConfig.class) {
+                if (sInstance == null) {
+                    sInstance = new SystemConfig();
+                }
+                return sInstance;
+            }
+        }
+
+        SystemConfig() {
+            // Read configuration from system
+            readPermissions(Environment.buildPath(Environment.getRootDirectory(), "etc", "sysconfig"), ALLOW_ALL);
+
+            // Read configuration from the old permissions dir
+            readPermissions(Environment.buildPath(Environment.getRootDirectory(), "etc", "permissions"), ALLOW_ALL);
+
+            // Vendors are only allowed to customze libs, features and privapp permissions
+            int vendorPermissionFlag = ALLOW_LIBS | ALLOW_FEATURES | ALLOW_PRIVAPP_PERMISSIONS;
+            if (Build.VERSION.FIRST_SDK_INT <= Build.VERSION_CODES.O_MR1) {
+                // For backward compatibility
+                vendorPermissionFlag |= (ALLOW_PERMISSIONS | ALLOW_APP_CONFIGS);
+            }
+            readPermissions(Environment.buildPath(Environment.getVendorDirectory(), "etc", "sysconfig"), vendorPermissionFlag);
+            readPermissions(Environment.buildPath(Environment.getVendorDirectory(), "etc", "permissions"), vendorPermissionFlag);
+
+            // Allow ODM to customize system configs as much as Vendor, because /odm is another vendor partition other than /vendor.
+            int odmPermissionFlag = vendorPermissionFlag;
+            readPermissions(Environment.buildPath(Environment.getOdmDirectory(), "etc", "sysconfig"), odmPermissionFlag);
+            readPermissions(Environment.buildPath(Environment.getOdmDirectory(), "etc", "permissions"), odmPermissionFlag);
+
+            // Allow OEM to customize features and OEM permissions
+            int oemPermissionFlag = ALLOW_FEATURES | ALLOW_OEM_PERMISSIONS;
+            readPermissions(Environment.buildPath(Environment.getOemDirectory(), "etc", "sysconfig"), oemPermissionFlag);
+            readPermissions(Environment.buildPath(Environment.getOemDirectory(), "etc", "permissions"), oemPermissionFlag);
+
+            // Allow Product to customize system configs around libs, features, permissions and apps
+            int productPermissionFlag = ALLOW_LIBS | ALLOW_FEATURES | ALLOW_PERMISSIONS | ALLOW_APP_CONFIGS | ALLOW_PRIVAPP_PERMISSIONS;
+            readPermissions(Environment.buildPath(Environment.getProductDirectory(), "etc", "sysconfig"), productPermissionFlag);
+            readPermissions(Environment.buildPath(Environment.getProductDirectory(), "etc", "permissions"), productPermissionFlag);
+        }
+
+        void readPermissions(File libraryDir, int permissionFlag) {
+            ......
+            for (File f : libraryDir.listFiles()) {
+                ......
+                readPermissionsFromXml(f, permissionFlag);
+            }
+            if (platformFile != null) {
+                readPermissionsFromXml(platformFile, permissionFlag);
+            }
+        }
+
+11.1.4 扫描应用目录的过程
+    PMS 的构造方法中调用了 scanDirTracedLI() 函数来扫描某个目录下的 APK 文件
+        private void scanDirTracedLI(File scanDir, final int parseFlags, int scanFlags, long currentTime) {
+            scanDirLI(scanDir, parseFlags, scanFlags, currentTime);
+        }
+
+        private void scanDirLI(File scanDir, int parseFlags, int scanFlags, long currentTime) {
+            final File[] files = scanDir.listFiles();
+            if (ArrayUtils.isEmpty(files)) {    // 如果扫描的目录是空的直接返回
+                return;
+            }
+            // 创建 ParallelPackageParser 对象
+            try (ParallelPackageParser parallelPackageParser = new ParallelPackageParser(mSeparateProcesses, mOnlyCore, mMetrics, mCacheDir, mParallelPackageParserCallback)) {
+                // Submit files for parsing in parallel
+                int fileCount = 0;
+                for (File file : files) {
+                    // 判断文件是否是应用文件
+                    final boolean isPackage = (isApkFile(file) || file.isDirectory()) && !PackageInstallerService.isStageName(file.getName());
+                    if (!isPackage) {   // 不是应用文件, 进入下一次循环
+                        continue;
+                    }
+                    // 调用 submit() 方法
+                    parallelPackageParser.submit(file, parseFlags);
+                    fileCount++;
+                }
+
+                // Process results one by one
+                for (; fileCount > 0; fileCount--) {
+                    ParallelPackageParser.ParseResult parseResult = parallelPackageParser.take();
+                    Throwable throwable = parseResult.throwable;
+                    int errorCode = PackageManager.INSTALL_SUCCEEDED;
+
+                    if (throwable == null) {
+                        if (parseResult.pkg.applicationInfo.isStaticSharedLibrary()) {
+                            renameStaticSharedLibraryPackage(parseResult.pkg);
+                        }
+                        try {
+                            if (errorCode == PackageManager.INSTALL_SUCCEEDED) {
+                                // 调用 scanPackageChildLI() 扫描文件
+                                scanPackageChildLI(parseResult.pkg, parseFlags, scanFlags, currentTime, null);
+                            }
+                        } catch (PackageManagerException e) {
+                            errorCode = e.error;
+                        }
+                    } else if (throwable instanceof PackageParser.PackageParserException) {
+                        PackageParser.PackageParserException e = (PackageParser.PackageParserException) throwable;
+                        errorCode = e.error;
+                    } else {
+                    }
+                    // 删除安装失败的文件和数据目录, Delete invalid userdata apps
+                    if ((scanFlags & SCAN_AS_SYSTEM) == 0 && errorCode != PackageManager.INSTALL_SUCCEEDED) {
+                        logCriticalInfo(Log.WARN, "Deleting invalid package at " + parseResult.scanFile);
+                        removeCodePathLI(parseResult.scanFile);
+                    }
+                }
+            }
+        }
+
+    下面先分析 scanDirLI() 方法带有 File 参数的实现.
+    (1) 解析文件
+        下面看 ParallelPackageParser 函数的 submit()方法实现代码:
+            public void submit(File scanFile, int parseFlags) {
+                mService.submit(() -> {
+                    ParseResult pr = new ParseResult();
+                    try {
+                        PackageParser pp = new PackageParser();
+                        pp.setSeparateProcesses(mSeparateProcesses);
+                        pp.setOnlyCoreApps(mOnlyCore);
+                        pp.setDisplayMetrics(mMetrics);
+                        pp.setCacheDir(mCacheDir);
+                        pp.setCallback(mPackageParserCallback);
+                        pr.scanFile = scanFile;
+                        pr.pkg = parsePackage(pp, scanFile, parseFlags);    // 调用 parsePackage()方法来解析参数中传递的文件对象 scanFile
+                    } catch (Throwable e) {
+                        pr.throwable = e;
+                    }
+                    try {
+                        mQueue.put(pr);
+                    } catch (InterruptedException e) {
+                        Thread.currentThread().interrupt();
+                        mInterruptedInThread = Thread.currentThread().getName();
+                    }
+                });
+            }
+    (2) 处理更改了包名的应用
+    (3) 处理安装了升级包的系统应用
+    (4) 扫描文件的签名
+        PMS 的 collectCertificatesLI()
+    (5) 处理应用的包名有冲突的情况
+    (6) 处理应用的代码路径和资源路径
+    (7) 调用参数为 PackageParser.Package 对象的 scanPackageLI() 方法
+        private PackageParser.Package scanPackageTracedLI(File scanFile, final int parseFlags, int scanFlags, long currentTime, UserHandle user) throws PackageManagerException {
+            return scanPackageLI(scanFile, parseFlags, scanFlags, currentTime, user);
+        }
+    (8) 结束
+
+    1. 建立 ResolverActivity 的内存对象
+        private void setUpCustomResolverActivity(PackageParser.Package pkg) {
+            synchronized (mPackages) {
+                mResolverReplaced = true;
+                // Set up information for custom user intent resolution activity.
+                mResolveActivity.applicationInfo = pkg.applicationInfo;
+                mResolveActivity.name = mCustomResolverComponentName.getClassName();
+                mResolveActivity.packageName = pkg.applicationInfo.packageName;
+                mResolveActivity.processName = pkg.applicationInfo.packageName;
+                mResolveActivity.launchMode = ActivityInfo.LAUNCH_MULTIPLE;
+                mResolveActivity.flags = ActivityInfo.FLAG_EXCLUDE_FROM_RECENTS | ActivityInfo.FLAG_FINISH_ON_CLOSE_SYSTEM_DIALOGS;
+                mResolveActivity.theme = 0;
+                mResolveActivity.exported = true;
+                mResolveActivity.enabled = true;
+                mResolveInfo.activityInfo = mResolveActivity;
+                mResolveInfo.priority = 0;
+                mResolveInfo.preferredOrder = 0;
+                mResolveInfo.match = 0;
+                mResolveComponentName = mCustomResolverComponentName;
+            }
+        }
+    2. 处理带有 <original-package> 标签的作用
+    3. 校验签名
+    4. 检查 ContentProvider 的名称
+    5. 确定应用将来的进程名称
+    6. 创建应用的数据目录
+    7. 安装应用中的动态库
+    8. 重新优化 dex
+    9. 提取应用中的组件信息
+
+
+11.1.5 解析 APK 文件
+    上一节介绍了, 解析 APK 文件是调用 PackageParser 的 parsePackage() 方法来完成的.
+
+    下面看 parsePackage() 函数实现, 代码路径 android.content.pm.PackageParser:
+        public Package parsePackage(File packageFile, int flags, boolean useCaches) throws PackageParserException {
+            Package parsed = useCaches ? getCachedResult(packageFile, flags) : null;    // 如果已经解析过, 直接从缓存中取
+            if (parsed != null) {
+                return parsed;
+            }
+            long parseTime = LOG_PARSE_TIMINGS ? SystemClock.uptimeMillis() : 0;    // 解析时间
+            if (packageFile.isDirectory()) {
+                parsed = parseClusterPackage(packageFile, flags);                   // 解析 package, 下面会继续分析
+            } else {
+                parsed = parseMonolithicPackage(packageFile, flags);
+            }
+            long cacheTime = LOG_PARSE_TIMINGS ? SystemClock.uptimeMillis() : 0;    // 缓存时间
+            cacheResult(packageFile, flags, parsed);        // 缓存解析结果
+            return parsed;
+        }
+
+    下面分析 parseClusterPackage() 方法, 代码如下:
+        private Package parseClusterPackage(File packageDir, int flags) throws PackageParserException {
+            final PackageLite lite = parseClusterPackageLite(packageDir, 0);    // 调用 parseClusterPackageLite() 方法
+            if (mOnlyCoreApps && !lite.coreApp) {
+                throw new PackageParserException(INSTALL_PARSE_FAILED_MANIFEST_MALFORMED, "Not a coreApp: " + packageDir);
+            }
+
+            // Build the split dependency tree.
+            SparseArray<int[]> splitDependencies = null;
+            final SplitAssetLoader assetLoader;
+            if (lite.isolatedSplits && !ArrayUtils.isEmpty(lite.splitNames)) {
+                try {
+                    splitDependencies = SplitAssetDependencyLoader.createDependenciesFromPackage(lite);
+                    assetLoader = new SplitAssetDependencyLoader(lite, splitDependencies, flags);
+                } catch (SplitAssetDependencyLoader.IllegalDependencyException e) {
+                    throw new PackageParserException(INSTALL_PARSE_FAILED_BAD_MANIFEST, e.getMessage());
+                }
+            } else {
+                assetLoader = new DefaultSplitAssetLoader(lite, flags);
+            }
+
+            try {
+                final AssetManager assets = assetLoader.getBaseAssetManager();  // 获取 AssetManager 对象
+                final File baseApk = new File(lite.baseCodePath);               // 新建 File 对象
+                final Package pkg = parseBaseApk(baseApk, assets, flags);       // 调用 parseBaseApk()方法解析应用的 AndroidManifest.xml 文件, 下面会继续分析
+                if (pkg == null) {
+                    throw new PackageParserException(INSTALL_PARSE_FAILED_NOT_APK, "Failed to parse base APK: " + baseApk);
+                }
+
+                if (!ArrayUtils.isEmpty(lite.splitNames)) {
+                    final int num = lite.splitNames.length;
+                    pkg.splitNames = lite.splitNames;
+                    pkg.splitCodePaths = lite.splitCodePaths;
+                    pkg.splitRevisionCodes = lite.splitRevisionCodes;
+                    pkg.splitFlags = new int[num];
+                    pkg.splitPrivateFlags = new int[num];
+                    pkg.applicationInfo.splitNames = pkg.splitNames;
+                    pkg.applicationInfo.splitDependencies = splitDependencies;
+                    pkg.applicationInfo.splitClassLoaderNames = new String[num];
+
+                    for (int i = 0; i < num; i++) {
+                        final AssetManager splitAssets = assetLoader.getSplitAssetManager(i);
+                        parseSplitApk(pkg, i, splitAssets, flags);
+                    }
+                }
+                pkg.setCodePath(packageDir.getCanonicalPath());     // 设置 packageDir
+                pkg.setUse32bitAbi(lite.use32bitAbi);
+                return pkg;
+            } catch (IOException e) {
+                throw new PackageParserException(INSTALL_PARSE_FAILED_UNEXPECTED_EXCEPTION, "Failed to get path: " + lite.baseCodePath, e);
+            } finally {
+                IoUtils.closeQuietly(assetLoader);
+            }
+        }
+    下面分析 parseBaseApk() 方法, 代码如下:
+        private Package parseBaseApk(File apkFile, AssetManager assets, int flags) throws PackageParserException {
+            final String apkPath = apkFile.getAbsolutePath();   // 获取 apkPath
+
+            String volumeUuid = null;
+            if (apkPath.startsWith(MNT_EXPAND)) {
+                final int end = apkPath.indexOf('/', MNT_EXPAND.length());
+                volumeUuid = apkPath.substring(MNT_EXPAND.length(), end);
+            }
+
+            mParseError = PackageManager.INSTALL_SUCCEEDED;
+            mArchiveSourcePath = apkFile.getAbsolutePath();
+
+            XmlResourceParser parser = null;
+            try {
+                final int cookie = assets.findCookieForPath(apkPath);       // 查找 cookie
+                parser = assets.openXmlResourceParser(cookie, ANDROID_MANIFEST_FILENAME);   // 创建 parser 对象
+                final Resources res = new Resources(assets, mMetrics, null);    // 创建 Resources 对象
+
+                final String[] outError = new String[1];
+                final Package pkg = parseBaseApk(apkPath, res, parser, flags, outError);    // 调用 parseBaseApk() 的重载方法继续解析, 下面会继续分析
+                pkg.setVolumeUuid(volumeUuid);
+                pkg.setApplicationVolumeUuid(volumeUuid);
+                pkg.setBaseCodePath(apkPath);
+                pkg.setSigningDetails(SigningDetails.UNKNOWN);
+                return pkg;
+
+            } catch (PackageParserException e) {
+            } catch (Exception e) {
+            } finally {
+                IoUtils.closeQuietly(parser);
+            }
+        }
+    下面看看 PackageParser 中定义的内部类:
+        @Retention(RetentionPolicy.SOURCE)
+        public @interface ParseFlags {}
+
+        public static class NewPermissionInfo {
+        public static class SplitPermissionInfo {
+
+        public static class PackageLite {
+        public static class ApkLite {
+
+        static class ParsePackageItemArgs {
+        public static class ParseComponentArgs extends ParsePackageItemArgs {
+
+        private static class CachedComponentArgs {
+        private static class SplitNameComparator implements Comparator<String> {
+
+        public static final class CallbackImpl implements Callback {
+        public static final class SigningDetails implements Parcelable {
+            public @interface SignatureSchemeVersion {
+                int UNKNOWN = 0;
+                int JAR = 1;
+                int SIGNING_BLOCK_V2 = 2;
+                int SIGNING_BLOCK_V3 = 3;
+            }
+
+            public @interface CertCapabilities {
+                /** accept data from already installed pkg with this cert */
+                int INSTALLED_DATA = 1;
+                /** accept sharedUserId with pkg with this cert */
+                int SHARED_USER_ID = 2;
+                /** grant SIGNATURE permissions to pkgs with this cert */
+                int PERMISSION = 4;
+                /** allow pkg to update to one signed by this certificate */
+                int ROLLBACK = 8;
+                /** allow pkg to continue to have auth access gated by this cert */
+                int AUTH = 16;
+            }
+        }
+        public final static class Package implements Parcelable {
+
+        public static abstract class IntentInfo extends IntentFilter {
+        public final static class ActivityIntentInfo extends IntentInfo {
+        public final static class ServiceIntentInfo extends IntentInfo {ProviderIntentInfo
+        public static final class ProviderIntentInfo extends IntentInfo {
+
+        public static abstract class Component<II extends IntentInfo> {
+        public final static class Permission extends Component<IntentInfo> implements Parcelable {
+        public final static class PermissionGroup extends Component<IntentInfo> implements Parcelable {
+        public final static class Activity extends Component<ActivityIntentInfo> implements Parcelable {
+        public final static class Service extends Component<ServiceIntentInfo> implements Parcelable {
+        public final static class Provider extends Component<ProviderIntentInfo> implements Parcelable {
+        public final static class Instrumentation extends Component<IntentInfo> implements Parcelable {
+
+
+    下面继续分析 parseBaseApk() 的重载方法, 代码如下:
+        private Package parseBaseApk(String apkPath, Resources res, XmlResourceParser parser, int flags, String[] outError) throws XmlPullParserException, IOException {
+            final String splitName;
+            final String pkgName;
+
+            Pair<String, String> packageSplit = parsePackageSplitNames(parser, parser);
+            pkgName = packageSplit.first;
+            splitName = packageSplit.second;
+
+            if (!TextUtils.isEmpty(splitName)) {
+                return null;
+            }
+
+            if (mCallback != null) {
+                String[] overlayPaths = mCallback.getOverlayPaths(pkgName, apkPath);
+                if (overlayPaths != null && overlayPaths.length > 0) {
+                    for (String overlayPath : overlayPaths) {
+                        res.getAssets().addOverlayPath(overlayPath);
+                    }
+                }
+            }
+            final Package pkg = new Package(pkgName);   // 创建 Package 对象, 此处的 Package 是
+            TypedArray sa = res.obtainAttributes(parser, com.android.internal.R.styleable.AndroidManifest);     // 获取 manifest 标签中定义的属性
+            pkg.mVersionCode = sa.getInteger(com.android.internal.R.styleable.AndroidManifest_versionCode, 0);
+            pkg.mVersionCodeMajor = sa.getInteger(com.android.internal.R.styleable.AndroidManifest_versionCodeMajor, 0);
+            pkg.applicationInfo.setVersionCode(pkg.getLongVersionCode());
+            pkg.baseRevisionCode = sa.getInteger(com.android.internal.R.styleable.AndroidManifest_revisionCode, 0);
+            pkg.mVersionName = sa.getNonConfigurationString(com.android.internal.R.styleable.AndroidManifest_versionName, 0);
+            if (pkg.mVersionName != null) {
+                pkg.mVersionName = pkg.mVersionName.intern();
+            }
+            pkg.coreApp = parser.getAttributeBooleanValue(null, "coreApp", false);
+            pkg.mCompileSdkVersion = sa.getInteger(com.android.internal.R.styleable.AndroidManifest_compileSdkVersion, 0);
+            pkg.applicationInfo.compileSdkVersion = pkg.mCompileSdkVersion;
+            pkg.mCompileSdkVersionCodename = sa.getNonConfigurationString(com.android.internal.R.styleable.AndroidManifest_compileSdkVersionCodename, 0);
+            if (pkg.mCompileSdkVersionCodename != null) {
+                pkg.mCompileSdkVersionCodename = pkg.mCompileSdkVersionCodename.intern();
+            }
+            pkg.applicationInfo.compileSdkVersionCodename = pkg.mCompileSdkVersionCodename;
+            sa.recycle();
+            return parseBaseApkCommon(pkg, null, res, parser, flags, outError);
+        }
+
+    由于 parseBaseApkCommon() 方法代码太长, 此处先不分析
+
+    下面暂时省略 parseBaseApkCommon()函数的的代码分析
+        parseBaseApkCommon() ---> parseBaseApplication() --->   parseActivity()
+                                                                parseProvider
+                                                                parseService()
+                                                                parseActivityAlias()
+                                                                parseMetaData()
+
+
+11.2 安装应用
+    PackageInstaller
+
+    PMS 中下面的常量:
+    private static final String PACKAGE_MIME_TYPE = "application/vnd.android.package-archive";
+
+11.2.1 管理"安装会话" - PackageInstallerService
+    PackageInstaller.createSession()  -> PackageInstallerService.createSession()
+
+        @Override
+        public int createSession(SessionParams params, String installerPackageName, int userId) {
+            try {
+                return createSessionInternal(params, installerPackageName, userId);
+            } catch (IOException e) {
+                throw ExceptionUtils.wrap(e);
+            }
+        }
+
+        @Override
+        public IPackageInstallerSession openSession(int sessionId) {
+            try {
+                return openSessionInternal(sessionId);
+            } catch (IOException e) {
+                throw ExceptionUtils.wrap(e);
+            }
+        }
+
+        private IPackageInstallerSession openSessionInternal(int sessionId) throws IOException {
+            synchronized (mSessions) {
+                final PackageInstallerSession session = mSessions.get(sessionId);
+                if (session == null || !isCallingUidOwner(session)) {
+                    throw new SecurityException("Caller has no access to session " + sessionId);
+                }
+                session.open();
+                return session;
+            }
+        }
+
+11.2.2 应用安装第一阶段: 复制文件
+
+11.2.3 应用安装第二阶段: 装载应用
+    class InstallParams extends HandlerParams
+    startCopy() -> handleReturnCode() -> processPendingInstall() -> installPackageLI()
+
+
+11.3 系统运行时的应用管理
+    deletePackageX()
+    deletePackageLIF()
+
+11.3.1 卸载应用
+    deletePackageAsUser() -> deletePackageVersioned()
+
+11.3.2 通过 Intent 查询组件
+    ResolveInfo
+    queryIntentActivities()
+    queryIntentServices()
+    queryIntentReceivers()
+    queryIntentContentProviders()
+
+        @Override
+        public List<ResolveInfo> queryIntentActivities(Intent intent, int flags, int filterCallingUid, int userId) {
+            final String resolvedType = intent.resolveTypeIfNeeded(mContext.getContentResolver());
+            return PackageManagerService.this.queryIntentActivitiesInternal(intent, resolvedType, flags, filterCallingUid, userId, false /*resolveForStart*/, true /*allowDynamicSplits*/);
+        }
+
+        private @NonNull List<ResolveInfo> queryIntentActivitiesInternal(Intent intent, String resolvedType, int flags, int filterCallingUid,
+                                                                            int userId, boolean resolveForStart, boolean allowDynamicSplits) {
+            if (!sUserManager.exists(userId)) return Collections.emptyList();
+            final String instantAppPkgName = getInstantAppPackageName(filterCallingUid);
+            mPermissionManager.enforceCrossUserPermission(Binder.getCallingUid(), userId,
+                    false /* requireFullPermission */, false /* checkShell */,
+                    "query intent activities");
+            final String pkgName = intent.getPackage();
+            ComponentName comp = intent.getComponent();
+            if (comp == null) {
+                if (intent.getSelector() != null) {
+                    intent = intent.getSelector();
+                    comp = intent.getComponent();
+                }
+            }
+
+            flags = updateFlagsForResolve(flags, userId, intent, filterCallingUid, resolveForStart,
+                    comp != null || pkgName != null /*onlyExposedExplicitly*/);
+            if (comp != null) {
+                final List<ResolveInfo> list = new ArrayList<ResolveInfo>(1);
+                final ActivityInfo ai = getActivityInfo(comp, flags, userId);
+                if (ai != null) {
+                    // When specifying an explicit component, we prevent the activity from being
+                    // used when either 1) the calling package is normal and the activity is within
+                    // an ephemeral application or 2) the calling package is ephemeral and the
+                    // activity is not visible to ephemeral applications.
+                    final boolean matchInstantApp =
+                            (flags & PackageManager.MATCH_INSTANT) != 0;
+                    final boolean matchVisibleToInstantAppOnly =
+                            (flags & PackageManager.MATCH_VISIBLE_TO_INSTANT_APP_ONLY) != 0;
+                    final boolean matchExplicitlyVisibleOnly =
+                            (flags & PackageManager.MATCH_EXPLICITLY_VISIBLE_ONLY) != 0;
+                    final boolean isCallerInstantApp =
+                            instantAppPkgName != null;
+                    final boolean isTargetSameInstantApp =
+                            comp.getPackageName().equals(instantAppPkgName);
+                    final boolean isTargetInstantApp =
+                            (ai.applicationInfo.privateFlags
+                                    & ApplicationInfo.PRIVATE_FLAG_INSTANT) != 0;
+                    final boolean isTargetVisibleToInstantApp =
+                            (ai.flags & ActivityInfo.FLAG_VISIBLE_TO_INSTANT_APP) != 0;
+                    final boolean isTargetExplicitlyVisibleToInstantApp =
+                            isTargetVisibleToInstantApp
+                            && (ai.flags & ActivityInfo.FLAG_IMPLICITLY_VISIBLE_TO_INSTANT_APP) == 0;
+                    final boolean isTargetHiddenFromInstantApp =
+                            !isTargetVisibleToInstantApp
+                            || (matchExplicitlyVisibleOnly && !isTargetExplicitlyVisibleToInstantApp);
+                    final boolean blockResolution =
+                            !isTargetSameInstantApp
+                            && ((!matchInstantApp && !isCallerInstantApp && isTargetInstantApp)
+                                    || (matchVisibleToInstantAppOnly && isCallerInstantApp
+                                            && isTargetHiddenFromInstantApp));
+                    if (!blockResolution) {
+                        final ResolveInfo ri = new ResolveInfo();
+                        ri.activityInfo = ai;
+                        list.add(ri);
+                    }
+                }
+                return applyPostResolutionFilter(
+                        list, instantAppPkgName, allowDynamicSplits, filterCallingUid, resolveForStart,
+                        userId, intent);
+            }
+
+            // reader
+            boolean sortResult = false;
+            boolean addInstant = false;
+            List<ResolveInfo> result;
+            synchronized (mPackages) {
+                if (pkgName == null) {
+                    List<CrossProfileIntentFilter> matchingFilters =
+                            getMatchingCrossProfileIntentFilters(intent, resolvedType, userId);
+                    // Check for results that need to skip the current profile.
+                    ResolveInfo xpResolveInfo  = querySkipCurrentProfileIntents(matchingFilters, intent,
+                            resolvedType, flags, userId);
+                    if (xpResolveInfo != null) {
+                        List<ResolveInfo> xpResult = new ArrayList<ResolveInfo>(1);
+                        xpResult.add(xpResolveInfo);
+                        return applyPostResolutionFilter(
+                                filterIfNotSystemUser(xpResult, userId), instantAppPkgName,
+                                allowDynamicSplits, filterCallingUid, resolveForStart, userId, intent);
+                    }
+
+                    // Check for results in the current profile.
+                    result = filterIfNotSystemUser(mActivities.queryIntent(
+                            intent, resolvedType, flags, userId), userId);
+                    addInstant = isInstantAppResolutionAllowed(intent, result, userId,
+                            false /*skipPackageCheck*/);
+                    // Check for cross profile results.
+                    boolean hasNonNegativePriorityResult = hasNonNegativePriority(result);
+                    xpResolveInfo = queryCrossProfileIntents(
+                            matchingFilters, intent, resolvedType, flags, userId,
+                            hasNonNegativePriorityResult);
+                    if (xpResolveInfo != null && isUserEnabled(xpResolveInfo.targetUserId)) {
+                        boolean isVisibleToUser = filterIfNotSystemUser(
+                                Collections.singletonList(xpResolveInfo), userId).size() > 0;
+                        if (isVisibleToUser) {
+                            result.add(xpResolveInfo);
+                            sortResult = true;
+                        }
+                    }
+                    if (intent.hasWebURI()) {
+                        CrossProfileDomainInfo xpDomainInfo = null;
+                        final UserInfo parent = getProfileParent(userId);
+                        if (parent != null) {
+                            xpDomainInfo = getCrossProfileDomainPreferredLpr(intent, resolvedType,
+                                    flags, userId, parent.id);
+                        }
+                        if (xpDomainInfo != null) {
+                            if (xpResolveInfo != null) {
+                                // If we didn't remove it, the cross-profile ResolveInfo would be twice
+                                // in the result.
+                                result.remove(xpResolveInfo);
+                            }
+                            if (result.size() == 0 && !addInstant) {
+                                // No result in current profile, but found candidate in parent user.
+                                // And we are not going to add emphemeral app, so we can return the
+                                // result straight away.
+                                result.add(xpDomainInfo.resolveInfo);
+                                return applyPostResolutionFilter(result, instantAppPkgName,
+                                        allowDynamicSplits, filterCallingUid, resolveForStart, userId,
+                                        intent);
+                            }
+                        } else if (result.size() <= 1 && !addInstant) {
+                            // No result in parent user and <= 1 result in current profile, and we
+                            // are not going to add emphemeral app, so we can return the result without
+                            // further processing.
+                            return applyPostResolutionFilter(result, instantAppPkgName,
+                                    allowDynamicSplits, filterCallingUid, resolveForStart, userId,
+                                    intent);
+                        }
+                        // We have more than one candidate (combining results from current and parent
+                        // profile), so we need filtering and sorting.
+                        result = filterCandidatesWithDomainPreferredActivitiesLPr(
+                                intent, flags, result, xpDomainInfo, userId);
+                        sortResult = true;
+                    }
+                } else {
+                    final PackageParser.Package pkg = mPackages.get(pkgName);
+                    result = null;
+                    if (pkg != null) {
+                        result = filterIfNotSystemUser(
+                                mActivities.queryIntentForPackage(
+                                        intent, resolvedType, flags, pkg.activities, userId),
+                                userId);
+                    }
+                    if (result == null || result.size() == 0) {
+                        // the caller wants to resolve for a particular package; however, there
+                        // were no installed results, so, try to find an ephemeral result
+                        addInstant = isInstantAppResolutionAllowed(
+                                        intent, null /*result*/, userId, true /*skipPackageCheck*/);
+                        if (result == null) {
+                            result = new ArrayList<>();
+                        }
+                    }
+                }
+            }
+            if (addInstant) {
+                result = maybeAddInstantAppInstaller(
+                        result, intent, resolvedType, flags, userId, resolveForStart);
+            }
+            if (sortResult) {
+                Collections.sort(result, mResolvePrioritySorter);
+            }
+            return applyPostResolutionFilter(result, instantAppPkgName, allowDynamicSplits, filterCallingUid, resolveForStart, userId, intent);
+        }
 
 
 
 
+11.4 守护进程 installd
+    installd
 
+11.4.1 installd 的初始化
+    /frameworks/native/cmds/installd/installd.rc
+    /frameworks/native/cmds/installd/installd.cpp
+    /frameworks/native/cmds/installd/binder/android/os/IInstalld.aidl
 
+11.4.2 变更 installd 进程的权限
 
+11.4.3 installd 中支持的命令
 
+11.4.4 分析 installd (安装)命令
 
+11.4.5 分析 patchoat (优化)命令
 
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
+11.4.6 分析 movefiles (移动)命令
 
 
 

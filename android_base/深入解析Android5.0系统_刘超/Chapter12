@@ -24,6 +24,126 @@ ActivityManagerService类中mProviderMap保存了系统中所有ContentProvider�
     public abstract int delete(Uri uri, String selection, String[] selectionArgs);
     public abstract int update(Uri uri, ContentValues values, String selection, String[] selectionArgs);
     public abstract Cursor query(Uri uri, String[] projection, String selection, String[] selectionArgs, String sortOrder);
+
+
+
+
+12.8.1 理解 BroadcastReceiver
+    public abstract class BroadcastReceiver {
+        private PendingResult mPendingResult;
+        public abstract void onReceive(Context context, Intent intent);
+
+        public static class PendingResult {
+            public static final int TYPE_COMPONENT = 0;
+            public static final int TYPE_REGISTERED = 1;
+            public static final int TYPE_UNREGISTERED = 2;
+
+            final int mType;
+            final boolean mOrderedHint;
+            final boolean mInitialStickyHint;
+            final IBinder mToken;
+            final int mSendingUser;
+            final int mFlags;
+
+            int mResultCode;
+            String mResultData;
+            Bundle mResultExtras;
+            boolean mAbortBroadcast;
+            boolean mFinished;
+
+            public final void setResultCode(int code)
+            public final int getResultCode()
+            public final void setResultData(String data)
+            public final String getResultData()
+            public final void setResultExtras(Bundle extras)
+            public final Bundle getResultExtras(boolean makeMap)
+            public final void setResult(int code, String data, Bundle extras)
+            public final boolean getAbortBroadcast()
+            public final void abortBroadcast()
+            public final void clearAbortBroadcast()
+            // Finish the broadcast.  The current result will be sent and the next broadcast will proceed.
+            public final void finish()
+        }
+
+        public final PendingResult goAsync() {
+            PendingResult res = mPendingResult;
+            mPendingResult = null;
+            return res;
+        }
+
+        public final void abortBroadcast()
+        public final boolean isOrderedBroadcast()
+        public final boolean isInitialStickyBroadcast()
+
+
+12.8.2
+    因为一个接收者可能包含有多个 IntentFilter, 所以接受者对象(ReceiverList)是一个数组 ArrayList, 定义如下:
+
+    public class ActivityManagerService extends IActivityManager.Stub implements Watchdog.Monitor, BatteryStatsImpl.BatteryCallback {
+        ......
+        BroadcastQueue mFgBroadcastQueue;   // 用来保存带有 Intent.FLAG_RECEIVER_FOREGROUND 标志的广播, 他要求接收者进程以 foreground 的优先级运行, 这样执行的更快. 如果不特别指定, 一般的广播是没有这个标志的.
+        BroadcastQueue mBgBroadcastQueue;   // Intent.FLAG_RECEIVER_INCLUDE_BACKGROUND, Intent.FLAG_RECEIVER_EXCLUDE_BACKGROUND,
+        // Convenient for easy iteration over the queues. Foreground is first so that dispatch of foreground broadcasts gets precedence.
+        final BroadcastQueue[] mBroadcastQueues = new BroadcastQueue[2];
+
+        BroadcastStats mLastBroadcastStats;
+        BroadcastStats mCurBroadcastStats;
+
+        BroadcastQueue broadcastQueueForIntent(Intent intent) {
+            final boolean isFg = (intent.getFlags() & Intent.FLAG_RECEIVER_FOREGROUND) != 0;
+            return (isFg) ? mFgBroadcastQueue : mBgBroadcastQueue;
+        }
+        ......
+        final HashMap<IBinder, ReceiverList> mRegisteredReceivers = new HashMap<>();
+        // mStickyBroadcasts 用来保存系统中所有粘性广播, SparseArray 类型的数组, 使用用户 is 作为索引, 保存的是 ArrayMap 对象, 这个存储的是某个用户发送的所有粘性广播
+        // 每条记录以 Intent 的 action 字符串作为索引, 保存的内容是一个 ArrayList 对象, 其中存储了所有包含该 action 的 Intent
+        final SparseArray<ArrayMap<String, ArrayList<Intent>>> mStickyBroadcasts = new SparseArray<ArrayMap<String, ArrayList<Intent>>>();
+        ......
+        public ActivityManagerService(Context systemContext) {
+            ......
+            mFgBroadcastQueue = new BroadcastQueue(this, mHandler, "foreground", BROADCAST_FG_TIMEOUT, false);
+            mBgBroadcastQueue = new BroadcastQueue(this, mHandler, "background", BROADCAST_BG_TIMEOUT, true);
+            mBroadcastQueues[0] = mFgBroadcastQueue;
+            mBroadcastQueues[1] = mBgBroadcastQueue;
+            ......
+        }
+    }
+
+
+    public final class BroadcastQueue {
+        ......
+        final ArrayList<BroadcastRecord> mParallelBroadcasts = new ArrayList<>();   // mParallelBroadcasts 用来保存所有普通的广播.
+        final ArrayList<BroadcastRecord> mOrderedBroadcasts = new ArrayList<>();    // mOrderedBroadcasts 用来保存所有有序广播.
+        final BroadcastRecord[] mBroadcastHistory = new BroadcastRecord[MAX_BROADCAST_HISTORY]; // mBroadcastHistory 用来保存所有发送过的广播, 主要用于调试.
+        ......
+    }
+
+
+    final class ReceiverList extends ArrayList<BroadcastFilter> implements IBinder.DeathRecipient {
+        final ActivityManagerService owner;
+        public final IIntentReceiver receiver;  // 用户进程中定义的 IntentReceiver
+        public final ProcessRecord app;         // 所属用户进程的 ProcessRecord 对象
+        public final int pid;                   // 所属用户进程的 pid
+        public final int uid;                   // 所属用户进程的 uid
+        public final int userId;                // 用户 id
+        BroadcastRecord curBroadcast = null;
+        boolean linkedToDeath = false;          // 是否注册了死亡通知
+
+        String stringName;
+    }
+    ReceiverList 继承了 IBinder.DeathRecipient, 如果注册了 receiver 的应用发生崩溃, AMS 中的 ReceiverList 对象就能收到通知, 去除这个进程的 receiver.
+
+
+    final class BroadcastFilter extends IntentFilter {
+        // Back-pointer to the list this filter is in.
+        final ReceiverList receiverList;    // 所属 ReceiverList 的引用
+        final String packageName;           // 所在应用的包名
+        final String requiredPermission;    // 权限字符串, requiredPermission 保存的是向 receiver 发送广播时需要申明的权限.
+        final int owningUid;                // 所在应用的 uid
+        final int owningUserId;             // 所在应用的 userId, owningUserId 是 receiver 注册时的用户id, Android 4.2 以后开始支持多用户, 不同用户注册的 receiver 不能混用.
+        final boolean instantApp;
+        final boolean visibleToInstantApp;
+    }
         
     
 

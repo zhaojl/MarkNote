@@ -2,7 +2,7 @@
 
 
 
-Zygote进程启动时会调用AndroidRuntime的start()函数来启动art虚拟机, ART系统的源码位于art目录下.
+Zygote 进程启动时会调用AndroidRuntime的start()函数来启动art虚拟机, ART系统的源码位于art目录下.
 
 
 
@@ -55,12 +55,739 @@ Zygote进程启动时会调用AndroidRuntime的start()函数来启动art虚拟�
         现在智能手机大部分都可以让用户选择使用Dalvik还是ART模式。默认还是使用Dalvik模式。
 
 
-4.5 SDK和JDK的区别:
+4.5 SDK 和 JDK的区别:
    SDK, 软件开发包(Soft Development Kit)
    需要指明是属于什么软件的开发包, 比如Android SDK就是Android开发包, Push SDK就是消息推送的SDK, 26版本的Android SDK, 没有Android SDK就无法进行Android开发.
     
    JDK, java开发工具包(Java Development Kit)
    工具包中提供了java语言的类库.
+
+
+
+
+
+
+22.2 Dalvik 的启动和初始化
+
+    在 Chapter5 中讲解 Android 的 JNI 时已经介绍过 AndroidRuntime.cpp 的部分函数.
+
+    Dalvik 虚拟机在 Zygote 进程中启动和初始化, AndroidRuntime.cpp 的 startVm() 函数开始启动 Dalvik.
+    art 虚拟机在 Zygote 进程中启动和初始化, AndroidRuntime.cpp 的 startVm() 函数开始启动 Dalvik.
+
+    Zygote 进程启动时会调用 AndroidRuntime.cpp 的 start() 函数来启动虚拟机, 下面开始分析 start() 函数.
+    请先看 JNI 中非常重要的几个类及其继承实现关系:
+            /*
+             * JNI specification, as defined by Sun:
+             * http://java.sun.com/javase/6/docs/technotes/guides/jni/spec/jniTOC.html
+             *
+             * Everything here is expected to be VM-neutral.
+             */
+            /libnativehelper/include_jni/jni.h
+
+            /libnativehelper/include/nativehelper/JniInvocation.h
+                #ifndef JNI_INVOCATION_H_included
+                #define JNI_INVOCATION_H_included
+                #include <jni.h>
+
+            /libnativehelper/JniInvocation.cpp
+                #include <nativehelper/JniInvocation.h>
+
+    下面看 AndroidRuntime::start() 函数实现代码, 代码路径 /frameworks/base/core/jni/AndroidRuntime.cpp
+        #include "jni.h"
+        #include <nativehelper/JNIHelp.h>
+        #include <nativehelper/JniInvocation.h>
+        #include "android_util_Binder.h"
+
+        void AndroidRuntime::start(const char* className, const Vector<String8>& options, bool zygote) {
+            static const String8 startSystemServer("start-system-server");
+            ......
+            // 配置环境变量 ANDROID_ROOT
+            const char* rootDir = getenv("ANDROID_ROOT");
+            if (rootDir == NULL) {
+                rootDir = "/system";
+                if (!hasDir("/system")) {
+                    LOG_FATAL("No root directory specified, and /android does not exist.");
+                    return;
+                }
+                setenv("ANDROID_ROOT", rootDir, 1);
+            }
+
+            // 启动虚拟机, start the virtual machine
+            JniInvocation jni_invocation;
+            jni_invocation.Init(NULL);      // 调用 JniInvocation::Init() 函数, 接下来会介绍
+
+            // 调用 AndroidRuntime::startVm() 启动虚拟机, ART 的初始化, 接下来会介绍.
+            JNIEnv* env;
+            if (startVm(&mJavaVM, &env, zygote) != 0) {
+                return;
+            }
+            onVmCreated(env);
+
+            // 注册 android natives 函数, Register android functions.
+            if (startReg(env) < 0) {
+                return;
+            }
+
+            /*
+             * 执行 ZygoteInit 类的 main() 方法, We want to call main() with a String array with arguments in it.
+             */
+            jclass stringClass;
+            jobjectArray strArray;
+            jstring classNameStr;
+
+            stringClass = env->FindClass("java/lang/String");
+            strArray = env->NewObjectArray(options.size() + 1, stringClass, NULL);
+            classNameStr = env->NewStringUTF(className);
+            env->SetObjectArrayElement(strArray, 0, classNameStr);
+
+            for (size_t i = 0; i < options.size(); ++i) {
+                jstring optionsStr = env->NewStringUTF(options.itemAt(i).string());
+                assert(optionsStr != NULL);
+                env->SetObjectArrayElement(strArray, i + 1, optionsStr);
+            }
+
+            /* Start VM.  This thread becomes the main thread of the VM, and will not return until the VM exits. */
+            char* slashClassName = toSlashClassName(className != NULL ? className : "");
+            jclass startClass = env->FindClass(slashClassName);
+            jmethodID startMeth = env->GetStaticMethodID(startClass, "main", "([Ljava/lang/String;)V"); // 调用 GetStaticMethodID() 得到 main 方法
+            env->CallStaticVoidMethod(startClass, startMeth, strArray);     // 调用 CallStaticVoidMethod() 执行 main 方法
+            free(slashClassName);
+
+            ALOGD("Shutting down VM\n");
+            if (mJavaVM->DetachCurrentThread() != JNI_OK)
+                ALOGW("Warning: unable to detach main thread\n");
+            if (mJavaVM->DestroyJavaVM() != 0)
+                ALOGW("Warning: VM did not shut down cleanly\n");
+        }
+
+    下面看 JniInvocation::Init() 函数实现代码, 代码路径 /libnativehelper/JniInvocation.cpp
+        static const char* kLibraryFallback = "libart.so";
+
+        bool JniInvocation::Init(const char* library) {
+          ......
+          library = GetLibrary(library, buffer);                // 从属性 "persist.sys.dalvik.vm.lib.2" 中取得虚拟机运行库的名称, 并将库名赋给 library
+          const int kDlopenFlags = RTLD_NOW | RTLD_NODELETE;    // 创建 kDlopenFlags 并赋值
+          handle_ = dlopen(library, kDlopenFlags);              // 调用 dlopen() 来装载虚拟机运行库, 传入库名 library
+          if (handle_ == NULL) {                                // 如果装载不成功
+            if (strcmp(library, kLibraryFallback) == 0) {       // kLibraryFallback 的值就是 "libart.so", 如果属性中的库名已经是 libart.so, 返回 false
+              return false;
+            }
+            library = kLibraryFallback;                         // 修改 library 的值为 "libart.so"
+            handle_ = dlopen(library, kDlopenFlags);            // 再次调用 dlopen() 函数来装载
+            if (handle_ == NULL) {                              // 如果还是装载不成功, 返回 false
+              return false;
+            }
+          }
+          // 装载虚拟机运行库成功之后, 装载 3 个 vm 的入口函数
+          if (!FindSymbol(reinterpret_cast<void**>(&JNI_GetDefaultJavaVMInitArgs_), "JNI_GetDefaultJavaVMInitArgs")) {
+            return false;
+          }
+          if (!FindSymbol(reinterpret_cast<void**>(&JNI_CreateJavaVM_), "JNI_CreateJavaVM")) {
+            return false;
+          }
+          if (!FindSymbol(reinterpret_cast<void**>(&JNI_GetCreatedJavaVMs_), "JNI_GetCreatedJavaVMs")) {
+            return false;
+          }
+          return true;
+        }
+    注:
+        JNI_GetDefaultJavaVMInitArgs()
+        JNI_CreateJavaVM()
+        JNI_GetCreatedJavaVMs()
+        这 3 个函数是虚拟机的 3 个入口, 通过调用它们就能创建出虚拟机系统.
+
+
+22.5.2 ART 的初始化
+    让我们再回到 AndroidRuntime::start() 函数, 执行完 JniInvocation::Init() 函数后, start() 函数将调用 startVm() 函数.
+
+    下面看 AndroidRuntime::startVm() 函数实现代码, 代码路径 /frameworks/base/core/jni/AndroidRuntime.cpp
+        #include "jni.h"
+        #include <nativehelper/JNIHelp.h>
+        #include <nativehelper/JniInvocation.h>
+        #include "android_util_Binder.h"
+
+        /bionic/libc/include/sys/system_properties.h
+            #define PROP_VALUE_MAX  92
+        /system/core/include/cutils/properties.h
+            #define PROPERTY_KEY_MAX   PROP_NAME_MAX
+            #define PROPERTY_VALUE_MAX  PROP_VALUE_MAX
+
+
+        int AndroidRuntime::startVm(JavaVM** pJavaVM, JNIEnv** pEnv, bool zygote) {
+            JavaVMInitArgs initArgs;        // 声明 initArgs
+
+            char propBuf[PROPERTY_VALUE_MAX];   // PROPERTY_VALUE_MAX 的值是 92
+            ......
+            parseRuntimeOption("dalvik.vm.heapstartsize", heapstartsizeOptsBuf, "-Xms", "4m");
+            parseRuntimeOption("dalvik.vm.heapsize", heapsizeOptsBuf, "-Xmx", "16m");
+            parseRuntimeOption("dalvik.vm.heapgrowthlimit", heapgrowthlimitOptsBuf, "-XX:HeapGrowthLimit=");
+            parseRuntimeOption("dalvik.vm.heapminfree", heapminfreeOptsBuf, "-XX:HeapMinFree=");
+            parseRuntimeOption("dalvik.vm.heapmaxfree", heapmaxfreeOptsBuf, "-XX:HeapMaxFree=");
+            parseRuntimeOption("dalvik.vm.heaptargetutilization", heaptargetutilizationOptsBuf, "-XX:HeapTargetUtilization=");
+            parseRuntimeOption("dalvik.vm.foreground-heap-growth-multiplier", foregroundHeapGrowthMultiplierOptsBuf, "-XX:ForegroundHeapGrowthMultiplier=");
+            parseRuntimeOption("dalvik.vm.usejit", usejitOptsBuf, "-Xusejit:");
+            parseRuntimeOption("dalvik.vm.jitmaxsize", jitmaxsizeOptsBuf, "-Xjitmaxsize:");
+            parseRuntimeOption("dalvik.vm.jitinitialsize", jitinitialsizeOptsBuf, "-Xjitinitialsize:");
+            parseRuntimeOption("dalvik.vm.jitthreshold", jitthresholdOptsBuf, "-Xjitthreshold:");
+            ......
+
+            initArgs.version = JNI_VERSION_1_4;
+            initArgs.options = mOptions.editArray();
+            initArgs.nOptions = mOptions.size();
+            initArgs.ignoreUnrecognized = JNI_FALSE;
+
+            /*
+             * Initialize the VM.
+             *
+             * The JavaVM* is essentially per-process, and the JNIEnv* is per-thread.
+             * If this call succeeds, the VM is ready, and we can start issuing JNI calls.
+             */
+            if (JNI_CreateJavaVM(pJavaVM, pEnv, &initArgs) < 0) {
+                ALOGE("JNI_CreateJavaVM failed");
+                return -1;
+            }
+
+            return 0;
+        }
+        注:
+            startVm()函数主要是根据启动时传入的参数和系统的属性值来设置 Dalvik 的属性.
+            startVm()函数主要工作是解析各种虚拟机相关的属性.
+            然后调用 JniInvocation.cpp 中的 JNI_CreateJavaVM()函数.
+
+
+    下面看 JNI_CreateJavaVM() 函数的实现代码, 代码路径 /art/runtime/java_vm_ext.cc
+        // JNI Invocation interface.
+        extern "C" jint JNI_CreateJavaVM(JavaVM** p_vm, JNIEnv** p_env, void* vm_args) {
+          const JavaVMInitArgs* args = static_cast<JavaVMInitArgs*>(vm_args);
+          if (JavaVMExt::IsBadJniVersion(args->version)) {  // 检查 JNI 版本, 必须是 JNI_VERSION_1_2 , JNI_VERSION_1_4 或者 JNI_VERSION_1_6
+            return JNI_EVERSION;
+          }
+          RuntimeOptions options;
+          for (int i = 0; i < args->nOptions; ++i) {
+            JavaVMOption* option = &args->options[i];
+            options.push_back(std::make_pair(std::string(option->optionString), option->extraInfo));    // 保存参数
+          }
+          bool ignore_unrecognized = args->ignoreUnrecognized;
+          if (!Runtime::Create(options, ignore_unrecognized)) {     // 调用 Runtime::Create() 函数创建虚拟机, 传入了 2 个参数, 接下来会介绍
+            return JNI_ERR;
+          }
+
+          // Initialize native loader. This step makes sure we have everything set up before we start using JNI.
+          android::InitializeNativeLoader();
+
+          Runtime* runtime = Runtime::Current();    // 调用 Runtime::Current() 函数来获得 Runtime 对象
+          bool started = runtime->Start();          // 调用 Runtime::Start() 函数来启动虚拟机
+          if (!started) {                           // 启动失败, 返回错误
+            delete Thread::Current()->GetJniEnv();
+            delete runtime->GetJavaVM();
+            LOG(WARNING) << "CreateJavaVM failed";
+            return JNI_ERR;
+          }
+
+          *p_env = Thread::Current()->GetJniEnv();  // 获取 JniEnv
+          *p_vm = runtime->GetJavaVM();             // 获取 JavaVM
+          return JNI_OK;
+        }
+
+        extern "C" jint JNI_GetCreatedJavaVMs(JavaVM** vms_buf, jsize buf_len, jsize* vm_count) {
+          Runtime* runtime = Runtime::Current();
+          if (runtime == nullptr || buf_len == 0) {
+            *vm_count = 0;
+          } else {
+            *vm_count = 1;
+            vms_buf[0] = runtime->GetJavaVM();
+          }
+          return JNI_OK;
+        }
+
+        // Historically unsupported.
+        extern "C" jint JNI_GetDefaultJavaVMInitArgs(void* /*vm_args*/) {
+          return JNI_ERR;
+        }
+    注:
+        JNI_CreateJavaVM() 调用了 Runtime::Create() 函数创建虚拟机, 然后又 调用 Runtime::Start() 函数来启动虚拟机.
+        在 ART 中, Runtime 对象 runtime 的地位 和 Dalvik 中的 DvmGlobals 对象 gDvm 类似, 包含了所有重要的变量.
+
+
+    下面继续分析 Runtime::Create() 函数实现代码, 代码路径 /art/runtime/runtime.cc:
+        bool Runtime::Create(const RuntimeOptions& raw_options, bool ignore_unrecognized) {
+          RuntimeArgumentMap runtime_options;
+          return ParseOptions(raw_options, ignore_unrecognized, &runtime_options) && Create(std::move(runtime_options));
+        }
+
+        bool Runtime::Create(RuntimeArgumentMap&& runtime_options) {
+          // TODO: acquire a static mutex on Runtime to avoid racing.
+          if (Runtime::instance_ != nullptr) {  // instance_ 不为 null, 直接返回, 只能创建一个 Runtime 实例.
+            return false;
+          }
+          instance_ = new Runtime;      // 创建 Runtime 类的实例对象.
+          Locks::SetClientCallback(IsSafeToCallAbort);
+          if (!instance_->Init(std::move(runtime_options))) {   // 调用 Runtime::Init() 函数来 初始化 Runtime 对象.
+            // TODO: Currently deleting the instance will abort the runtime on destruction.
+            // Now This will leak memory, instead. Fix the destructor. b/19100793.
+            // delete instance_;
+            instance_ = nullptr;
+            return false;
+          }
+          return true;
+        }
+    注:
+        Runtime::Create() 函数创建了 Runtime 对象, 只能创建一次.
+        创建成功后调用 Runtime::Init() 函数进行初始化.
+
+    下面接着看 Runtime::Init() 函数实现代码:
+        bool Runtime::Init(RuntimeArgumentMap&& runtime_options_in) {
+          ......
+
+          using Opt = RuntimeArgumentMap;
+          Opt runtime_options(std::move(runtime_options_in));   // runtime_options_in 经过解析后的参数放到了变量 runtime_options 中
+          CHECK_EQ(sysconf(_SC_PAGE_SIZE), kPageSize);
+
+          MemMap::Init();
+          ......
+
+          QuasiAtomic::Startup();
+
+          oat_file_manager_ = new OatFileManager;
+
+          Thread::SetSensitiveThreadHook(runtime_options.GetOrDefault(Opt::HookIsSensitiveThread));
+          Monitor::Init(runtime_options.GetOrDefault(Opt::LockProfThreshold), runtime_options.GetOrDefault(Opt::StackDumpLockProfThreshold));
+          // 操作 runtime_options
+          // 初始化 monitor_list_, monitor_pool_, thread_list_, intern_table_ 等内部变量
+          monitor_list_ = new MonitorList;
+          monitor_pool_ = MonitorPool::Create();
+          thread_list_ = new ThreadList(runtime_options.GetOrDefault(Opt::ThreadSuspendTimeout));
+          intern_table_ = new InternTable;
+
+          verify_ = runtime_options.GetOrDefault(Opt::Verify);
+          fingerprint_ = runtime_options.ReleaseOrDefault(Opt::Fingerprint);
+
+          if (runtime_options.GetOrDefault(Opt::Interpret)) {
+            GetInstrumentation()->ForceInterpretOnly();
+          }
+          ......
+          XGcOption xgc_option = runtime_options.GetOrDefault(Opt::GcOption);
+          // 创建堆 heap_ 对象
+          heap_ = new gc::Heap(runtime_options.GetOrDefault(Opt::MemoryInitialSize),
+                               runtime_options.GetOrDefault(Opt::HeapGrowthLimit),
+                               runtime_options.GetOrDefault(Opt::HeapMinFree),
+                               runtime_options.GetOrDefault(Opt::HeapMaxFree),
+                               runtime_options.GetOrDefault(Opt::HeapTargetUtilization),
+                               foreground_heap_growth_multiplier,
+                               runtime_options.GetOrDefault(Opt::MemoryMaximumSize),
+                               runtime_options.GetOrDefault(Opt::NonMovingSpaceCapacity),
+                               runtime_options.GetOrDefault(Opt::Image),
+                               runtime_options.GetOrDefault(Opt::ImageInstructionSet),
+                               // Override the collector type to CC if the read barrier config.
+                               kUseReadBarrier ? gc::kCollectorTypeCC : xgc_option.collector_type_,
+                               kUseReadBarrier ? BackgroundGcOption(gc::kCollectorTypeCCBackground) : runtime_options.GetOrDefault(Opt::BackgroundGc),
+                               runtime_options.GetOrDefault(Opt::LargeObjectSpace),
+                               runtime_options.GetOrDefault(Opt::LargeObjectThreshold),
+                               runtime_options.GetOrDefault(Opt::ParallelGCThreads),
+                               runtime_options.GetOrDefault(Opt::ConcGCThreads),
+                               runtime_options.Exists(Opt::LowMemoryMode),
+                               runtime_options.GetOrDefault(Opt::LongPauseLogThreshold),
+                               runtime_options.GetOrDefault(Opt::LongGCLogThreshold),
+                               runtime_options.Exists(Opt::IgnoreMaxFootprint),
+                               runtime_options.GetOrDefault(Opt::UseTLAB),
+                               xgc_option.verify_pre_gc_heap_,
+                               xgc_option.verify_pre_sweeping_heap_,
+                               xgc_option.verify_post_gc_heap_,
+                               xgc_option.verify_pre_gc_rosalloc_,
+                               xgc_option.verify_pre_sweeping_rosalloc_,
+                               xgc_option.verify_post_gc_rosalloc_,
+                               xgc_option.gcstress_,
+                               xgc_option.measure_,
+                               runtime_options.GetOrDefault(Opt::EnableHSpaceCompactForOOM),
+                               runtime_options.GetOrDefault(Opt::HSpaceCompactForOOMMinIntervalsMs));
+
+          if (!heap_->HasBootImageSpace() && !allow_dex_file_fallback_) {
+            LOG(ERROR) << "Dex file fallback disabled, cannot continue without image.";
+            return false;
+          }
+          ......
+          std::string error_msg;
+          java_vm_ = JavaVMExt::Create(this, runtime_options, &error_msg);      // 创建 JavaVMExt 对象
+          if (java_vm_.get() == nullptr) {                                      // Could not initialize JavaVMExt
+            return false;
+          }
+
+          // Add the JniEnv handler.
+          java_vm_->AddEnvironmentHook(JNIEnvExt::GetEnvHandler);
+
+          // 将当前的主线程变成一个 Java main 线程
+          Thread::Startup();
+          Thread* self = Thread::Attach("main", false, nullptr, false);
+          CHECK_EQ(self->GetThreadId(), ThreadList::kMainThreadId);
+          CHECK(self != nullptr);
+
+          self->SetCanCallIntoJava(!IsAotCompiler());
+
+          // Set us to runnable so tools using a runtime can allocate and GC by default
+          self->TransitionFromSuspendedToRunnable();
+
+          // Now we're attached, we can take the heap locks and validate the heap.
+          GetHeap()->EnableObjectValidation();
+
+          CHECK_GE(GetHeap()->GetContinuousSpaces().size(), 1U);
+          // 创建 ClassLinker 对象
+          if (UNLIKELY(IsAotCompiler())) {
+            class_linker_ = new AotClassLinker(intern_table_);
+          } else {
+            class_linker_ = new ClassLinker(intern_table_);
+          }
+          if (GetHeap()->HasBootImageSpace()) {     //  系统不是第一次启动将运行这个分支
+            bool result = class_linker_->InitFromBootImage(&error_msg);     // 调用 ClassLinker::InitFromBootImage()
+            if (!result) {
+              return false;
+            }
+            if (kIsDebugBuild) {
+              for (auto image_space : GetHeap()->GetBootImageSpaces()) {
+                image_space->VerifyImageAllocations();
+              }
+            }
+            if (boot_class_path_string_.empty()) {  // 创建 DexFile 列表 vector<const DexFile*>
+              const std::vector<const DexFile*>& boot_class_path = GetClassLinker()->GetBootClassPath();
+              std::vector<std::string> dex_locations;
+              dex_locations.reserve(boot_class_path.size());
+              for (const DexFile* dex_file : boot_class_path) {
+                dex_locations.push_back(dex_file->GetLocation());
+              }
+              boot_class_path_string_ = android::base::Join(dex_locations, ':');
+            }
+            {
+              ScopedTrace trace2("AddImageStringsToTable");
+              GetInternTable()->AddImagesStringsToTable(heap_->GetBootImageSpaces());
+            }
+            if (IsJavaDebuggable()) {
+              // Now that we have loaded the boot image, deoptimize its methods if we are running
+              // debuggable, as the code may have been compiled non-debuggable.
+              DeoptimizeBootImage();
+            }
+          } else {      // 系统第一次运行执行这个分支
+            std::vector<std::string> dex_filenames;
+            Split(boot_class_path_string_, ':', &dex_filenames);
+
+            std::vector<std::string> dex_locations;
+            if (!runtime_options.Exists(Opt::BootClassPathLocations)) {
+              dex_locations = dex_filenames;
+            } else {
+              dex_locations = runtime_options.GetOrDefault(Opt::BootClassPathLocations);
+              CHECK_EQ(dex_filenames.size(), dex_locations.size());
+            }
+
+            std::vector<std::unique_ptr<const DexFile>> boot_class_path;
+            if (runtime_options.Exists(Opt::BootClassPathDexList)) {
+              boot_class_path.swap(*runtime_options.GetOrDefault(Opt::BootClassPathDexList));
+            } else {
+              OpenDexFiles(dex_filenames,
+                           dex_locations,
+                           runtime_options.GetOrDefault(Opt::Image),
+                           &boot_class_path);
+            }
+            instruction_set_ = runtime_options.GetOrDefault(Opt::ImageInstructionSet);
+            if (!class_linker_->InitWithoutImage(std::move(boot_class_path), &error_msg)) { // 调用 ClassLinker::InitWithoutImage()
+              LOG(ERROR) << "Could not initialize without image: " << error_msg;
+              return false;
+            }
+
+            // TODO: Should we move the following to InitWithoutImage?
+            SetInstructionSet(instruction_set_);
+            for (uint32_t i = 0; i < kCalleeSaveSize; i++) {
+              CalleeSaveType type = CalleeSaveType(i);
+              if (!HasCalleeSaveMethod(type)) {
+                SetCalleeSaveMethod(CreateCalleeSaveMethod(), type);
+              }
+            }
+          }
+          CHECK(class_linker_ != nullptr);
+
+          verifier::MethodVerifier::Init();
+          ......
+
+          // Runtime initialization is largely done now.
+          // We load plugins first since that can modify the runtime state slightly.
+          // Load all plugins
+          for (auto& plugin : plugins_) {
+            std::string err;
+            if (!plugin.Load(&err)) {
+              LOG(FATAL) << plugin << " failed to load: " << err;
+            }
+          }
+
+          // Look for a native bridge.
+          //
+          // The intended flow here is, in the case of a running system:
+          //
+          // Runtime::Init() (zygote):
+          //   LoadNativeBridge -> dlopen from cmd line parameter.
+          //  |
+          //  V
+          // Runtime::Start() (zygote):
+          //   No-op wrt native bridge.
+          //  |
+          //  | start app
+          //  V
+          // DidForkFromZygote(action)
+          //   action = kUnload -> dlclose native bridge.
+          //   action = kInitialize -> initialize library
+          //
+          //
+          // The intended flow here is, in the case of a simple dalvikvm call:
+          //
+          // Runtime::Init():
+          //   LoadNativeBridge -> dlopen from cmd line parameter.
+          //  |
+          //  V
+          // Runtime::Start():
+          //   DidForkFromZygote(kInitialize) -> try to initialize any native bridge given.
+          //   No-op wrt native bridge.
+          {
+            std::string native_bridge_file_name = runtime_options.ReleaseOrDefault(Opt::NativeBridge);
+            is_native_bridge_loaded_ = LoadNativeBridge(native_bridge_file_name);
+          }
+
+          // Startup agents
+          // TODO Maybe we should start a new thread to run these on. Investigate RI behavior more.
+          for (auto& agent_spec : agent_specs_) {
+            // TODO Check err
+            int res = 0;
+            std::string err = "";
+            ti::LoadError error;
+            std::unique_ptr<ti::Agent> agent = agent_spec.Load(&res, &error, &err);
+
+            if (agent != nullptr) {
+              agents_.push_back(std::move(agent));
+              continue;
+            }
+            ......
+            LOG(FATAL) << "Unreachable";
+            UNREACHABLE();
+          }
+          {
+            ScopedObjectAccess soa(self);
+            callbacks_->NextRuntimePhase(RuntimePhaseCallback::RuntimePhase::kInitialAgents);
+          }
+
+          VLOG(startup) << "Runtime::Init exiting";
+
+          // Set OnlyUseSystemOatFiles only after boot classpath has been set up.
+          if (runtime_options.Exists(Opt::OnlyUseSystemOatFiles)) {
+            oat_file_manager_->SetOnlyUseSystemOatFiles();
+          }
+
+          return true;
+        }
+    注:
+        ......
+
+    下面看 ClassLinker::InitFromBootImage() 函数实现代码如下, 代码路径 /art/runtime/class_linker.cc
+        bool ClassLinker::InitFromBootImage(std::string* error_msg) {
+          Runtime* const runtime = Runtime::Current();
+          Thread* const self = Thread::Current();
+          gc::Heap* const heap = runtime->GetHeap();
+          std::vector<gc::space::ImageSpace*> spaces = heap->GetBootImageSpaces();      // 获得 heap 中的 ImageSpace 对象
+          uint32_t pointer_size_unchecked = spaces[0]->GetImageHeader().GetPointerSizeUnchecked();
+          image_pointer_size_ = spaces[0]->GetImageHeader().GetPointerSize();
+          std::vector<const OatFile*> oat_files = runtime->GetOatFileManager().RegisterImageOatFiles(spaces);
+          const OatHeader& default_oat_header = oat_files[0]->GetOatHeader();
+          ......
+          // 从 ImageSpace 对象中得到 class_roots_
+          class_roots_ = GcRoot<mirror::ObjectArray<mirror::Class>>(
+              down_cast<mirror::ObjectArray<mirror::Class>*>(spaces[0]->GetImageHeader().GetImageRoot(ImageHeader::kClassRoots))
+              );
+          // 初始化基本类
+          mirror::Class::SetClassClass(class_roots_.Read()->Get(kJavaLangClass));
+          mirror::String::SetClass(GetClassRoot(kJavaLangString));
+          ObjPtr<mirror::Class> java_lang_Object = GetClassRoot(kJavaLangObject);
+          java_lang_Object->SetObjectSize(sizeof(mirror::Object));
+          runtime->SetSentinel(heap->AllocNonMovableObject<true>(self, java_lang_Object, java_lang_Object->GetObjectSize(), VoidFunctor()));
+          array_iftable_ = GcRoot<mirror::IfTable>(GetClassRoot(kObjectArrayClass)->GetIfTable());
+          DCHECK_EQ(array_iftable_.Read(), GetClassRoot(kBooleanArrayClass)->GetIfTable());
+          mirror::Field::SetClass(GetClassRoot(kJavaLangReflectField));
+          mirror::Field::SetArrayClass(GetClassRoot(kJavaLangReflectFieldArrayClass));
+          mirror::Constructor::SetClass(GetClassRoot(kJavaLangReflectConstructor));
+          mirror::Constructor::SetArrayClass(GetClassRoot(kJavaLangReflectConstructorArrayClass));
+          mirror::Method::SetClass(GetClassRoot(kJavaLangReflectMethod));
+          mirror::Method::SetArrayClass(GetClassRoot(kJavaLangReflectMethodArrayClass));
+          mirror::CallSite::SetClass(GetClassRoot(kJavaLangInvokeCallSite));
+          mirror::MethodHandleImpl::SetClass(GetClassRoot(kJavaLangInvokeMethodHandleImpl));
+          mirror::MethodHandlesLookup::SetClass(GetClassRoot(kJavaLangInvokeMethodHandlesLookup));
+          mirror::MethodType::SetClass(GetClassRoot(kJavaLangInvokeMethodType));
+          mirror::VarHandle::SetClass(GetClassRoot(kJavaLangInvokeVarHandle));
+          mirror::FieldVarHandle::SetClass(GetClassRoot(kJavaLangInvokeFieldVarHandle));
+          mirror::ArrayElementVarHandle::SetClass(GetClassRoot(kJavaLangInvokeArrayElementVarHandle));
+          mirror::ByteArrayViewVarHandle::SetClass(GetClassRoot(kJavaLangInvokeByteArrayViewVarHandle));
+          mirror::ByteBufferViewVarHandle::SetClass(GetClassRoot(kJavaLangInvokeByteBufferViewVarHandle));
+          mirror::Reference::SetClass(GetClassRoot(kJavaLangRefReference));
+          mirror::BooleanArray::SetArrayClass(GetClassRoot(kBooleanArrayClass));
+          mirror::ByteArray::SetArrayClass(GetClassRoot(kByteArrayClass));
+          mirror::CharArray::SetArrayClass(GetClassRoot(kCharArrayClass));
+          mirror::DoubleArray::SetArrayClass(GetClassRoot(kDoubleArrayClass));
+          mirror::FloatArray::SetArrayClass(GetClassRoot(kFloatArrayClass));
+          mirror::IntArray::SetArrayClass(GetClassRoot(kIntArrayClass));
+          mirror::LongArray::SetArrayClass(GetClassRoot(kLongArrayClass));
+          mirror::ShortArray::SetArrayClass(GetClassRoot(kShortArrayClass));
+          mirror::Throwable::SetClass(GetClassRoot(kJavaLangThrowable));
+          mirror::StackTraceElement::SetClass(GetClassRoot(kJavaLangStackTraceElement));
+          mirror::EmulatedStackFrame::SetClass(GetClassRoot(kDalvikSystemEmulatedStackFrame));
+          mirror::ClassExt::SetClass(GetClassRoot(kDalvikSystemClassExt));
+
+          for (gc::space::ImageSpace* image_space : spaces) {
+            // Boot class loader, use a null handle.
+            std::vector<std::unique_ptr<const DexFile>> dex_files;  // dex_files 数组中保存的是 前面加载的系统类的 dex 文件信息.
+            if (!AddImageSpace(image_space,     // 内部会调用 AppendToBootClassPath() 函数把 dex文件信息加入到 ClassLinker 的 boot_class_path_ 变量中
+                               ScopedNullHandle<mirror::ClassLoader>(),
+                               /*dex_elements*/nullptr,
+                               /*dex_location*/nullptr,
+                               /*out*/&dex_files,
+                               error_msg)) {
+              return false;
+            }
+            // Append opened dex files at the end.
+            boot_dex_files_.insert(boot_dex_files_.end(),
+                                   std::make_move_iterator(dex_files.begin()),
+                                   std::make_move_iterator(dex_files.end()));
+          }
+          for (const std::unique_ptr<const DexFile>& dex_file : boot_dex_files_) {
+            OatDexFile::MadviseDexFile(*dex_file, MadviseState::kMadviseStateAtLoad);
+          }
+          FinishInit(self);
+          return true;
+        }
+    注:
+        InitFromBootImage() 函数完成预注册类的加载后, 还会对系统的基本类, 如 Field, Method, IntArray的进行初始化.
+        完成后 ART 系统的初始化就结束了.
+
+
+
+22.5.3 ART 开始运行
+    再回到 JNI_CreateJavaVM() 中, 初始化完成之后, 接下来是调用 Runtime::Start() 函数开始执行, 函数代码如下:
+        bool Runtime::Start() {
+          Thread* self = Thread::Current();
+          self->TransitionFromRunnableToSuspended(kNative);
+          started_ = true;
+
+          if (!IsImageDex2OatEnabled() || !GetHeap()->HasBootImageSpace()) {
+            auto class_class(hs.NewHandle<mirror::Class>(mirror::Class::GetJavaLangClass()));
+            auto field_class(hs.NewHandle<mirror::Class>(mirror::Field::StaticClass()));
+            class_linker_->EnsureInitialized(soa.Self(), class_class, true, true);
+            // Field class is needed for register_java_net_InetAddress in libcore.
+            class_linker_->EnsureInitialized(soa.Self(), field_class, true, true);
+          }
+
+          // 初始化本地的 JNI 方法, InitNativeMethods needs to be after started_ so that the classes it touches will have methods linked to the oat file if necessary.
+          InitNativeMethods();
+          InitializeIntrinsics();
+          InitThreadGroups(self);
+          Thread::FinishStartup();
+          if (jit_options_->UseJitCompilation() || jit_options_->GetSaveProfilingInfo()) {
+            std::string error_msg;
+            if (!IsZygote()) {
+              CreateJit();
+            } else if (jit_options_->UseJitCompilation()) {
+              if (!jit::Jit::LoadCompilerLibrary(&error_msg)) {
+              }
+            }
+          }
+          // 初始化 Zygote
+          callbacks_->NextRuntimePhase(RuntimePhaseCallback::RuntimePhase::kStart);
+          // 创建一个 ClassLoader 对象
+          system_class_loader_ = CreateSystemClassLoader(this);
+          if (!is_zygote_) {        // 初始化 Zygote
+            if (is_native_bridge_loaded_) {
+              PreInitializeNativeBridge(".");
+            }
+            NativeBridgeAction action = force_native_bridge_ ? NativeBridgeAction::kInitialize : NativeBridgeAction::kUnload;
+            InitNonZygoteOrPostFork(self->GetJniEnv(), /* is_system_server */ false, action, GetInstructionSetString(kRuntimeISA));
+          }
+
+          callbacks_->NextRuntimePhase(RuntimePhaseCallback::RuntimePhase::kInit);
+
+          StartDaemonThreads();     // 调用 java.lang.Daemons 的 start() 方法
+          self->GetJniEnv()->AssertLocalsEmpty();
+          finished_starting_ = true;
+
+          // 如果 Profile 文件不存在, 创建 Profile 文件
+          if (jit_.get() != nullptr && jit_options_->GetSaveProfilingInfo() && !jit_options_->GetProfileSaverOptions().GetProfilePath().empty()) {
+            std::vector<std::string> dex_filenames;
+            Split(class_path_string_, ':', &dex_filenames);
+            RegisterAppInfo(dex_filenames, jit_options_->GetProfileSaverOptions().GetProfilePath());    // RegisterAppInfo()
+          }
+          return true;
+        }
+    注:
+        Start() 函数中会调用 InitNativeMethods() 来初始化本地的 JNI 函数, ART 对部分系统的 JNI 函数进行了重写, 但是实现原理和 Dalvik 没有太大区别.
+        调用 InitNativeMethods()  后这些 JNI 函数就可以使用了.
+
+        InitThreadGroups() 函数会从 Java 类 java.lang.ThreadGroup 中取出两个静态成员变量对象 systemThreadGroup 和 mainThreadGroup.
+        并保存在 Runtime 对象的 system_thread_group_ 和 main_thread_group_ 中.
+
+        接下来如果是在 Zygote 进程中, Start()会调用 XX 函数来进行初始化, 这个函数中的实现和 Dalvik中的几乎一样, 主要工作是设置进程的 group_id, 以及 mount_rootfs
+        文件系统根目录.
+
+        如果不在 Zygote 进程中, 则创建线程池.
+
+        最后调用 StartDaemonThreads() 函数, 这个函数将调用 Java 类 java.lang.Daemons 的 start() 方法来启动几个 daemon 线程, 这些 daemon 线程前面已经介绍过了.
+
+
+
+/art/runtime/gc/space/image_space.cc
+
+static bool FindImageFilenameImpl(const char* image_location,
+                                  const InstructionSet image_isa,
+                                  bool* has_system,
+                                  std::string* system_filename,
+                                  bool* dalvik_cache_exists,
+                                  std::string* dalvik_cache,
+                                  bool* is_global_cache,
+                                  bool* has_cache,
+                                  std::string* cache_filename) {
+  DCHECK(dalvik_cache != nullptr);
+
+  *has_system = false;
+  *has_cache = false;
+  // image_location = /system/framework/boot.art
+  // system_image_location = /system/framework/<image_isa>/boot.art
+  std::string system_image_filename(GetSystemImageFilename(image_location, image_isa));
+  if (OS::FileExists(system_image_filename.c_str())) {
+    *system_filename = system_image_filename;
+    *has_system = true;
+  }
+
+  bool have_android_data = false;
+  *dalvik_cache_exists = false;
+  GetDalvikCache(GetInstructionSetString(image_isa),
+                 true,
+                 dalvik_cache,
+                 &have_android_data,
+                 dalvik_cache_exists,
+                 is_global_cache);
+
+  if (have_android_data && *dalvik_cache_exists) {
+    // Always set output location even if it does not exist,
+    // so that the caller knows where to create the image.
+    //
+    // image_location = /system/framework/boot.art
+    // *image_filename = /data/dalvik-cache/<image_isa>/boot.art
+    std::string error_msg;
+    if (!GetDalvikCacheFilename(image_location,
+                                dalvik_cache->c_str(),
+                                cache_filename,
+                                &error_msg)) {
+      LOG(WARNING) << error_msg;
+      return *has_system;
+    }
+    *has_cache = OS::FileExists(cache_filename->c_str());
+  }
+  return *has_system || *has_cache;
+}
+
+
+
+KitKat - 4.4.4_r1
+4.4.4_r1/xref/dalvik/vm/Globals.h
+/dalvik/vm/Init.cpp
 
 
 

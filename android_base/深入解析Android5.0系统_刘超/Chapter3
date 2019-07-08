@@ -1,52 +1,694 @@
 第三章 连接 Android 和 Linux 内核的桥梁 － Android 的 Bionic
 
 
+
+Bionic 库是 Android 的基础库之一, 是连接 Android 和 Linux 内核的桥梁.
+Bionic 库中包含了很多基本功能, 这些功能大部分源于 Linux, 但是和标准的 Linux 之间有很多细微的差别.
+同时 Bionic 库中增加了一些新的模块, 服务于 Android 的上层代码.
+了解 Bionic 库中这些模块的原理, 对我们阅读其他部分的代码会有比较大的帮助.
+
+https://www.jianshu.com/p/25a908c7eefa
+
+
+
+本章对 Bionic 的介绍将集中在 Android 特有的模块, 例如 linker, log等, 以及一些和本书后面的内容息息相关的模块: 线程管理和内存管理模块等.
+
+
+
 3.1 Bionic简介
-3.1.1 Bionic的特性
-3.1.2 Bionic中的模块简介
-3.2 Bionic C库中的系统调用
-3.2.1 系统调用简介
-3.2.2 系统调用的实现方法
+    Bionic 包含了系统中最基本的 lib 库, 包括 libc, libdl, libm, libstdc++, 以及 Android 特有的链接器 linker.
+
+    3.1.1 Bionic的特性
+        本节内容摘自libc 目录下的 readme.txt 文件的部分内容, http://androidxref.com/4.2.2_r1/xref//bionic/libc/README.
+
+        1. 架构
+            Bionic 当前支持 ARM, x86 和 MIPS 指令集.
+                ARM 相关的代码在目录 arch-arm 中;
+                x86 相关的代码在目录 arch-x86 中;
+                mips 相关的代码在目录 arch-mips 中;
+        2. time_t
+        3. strftime_tz()
+        4. 时区管理
+        5. Off_t
+        6. Linux 核心头文件
+            Bionic 自带一套经过清理的 Linux 内核头文件, 允许用户空间代码使用内核特有的声明(如 ioctls, 结构定义, 常量等), 这些头文件所在目录如下:
+                /bionic/libc/kernel/arch-arm/
+                /bionic/libc/kernel/arch-mips/
+                /bionic/libc/kernel/arch-x86/
+                /bionic/libc/kernel/common/
+            注:
+                这些头文件是通过工具 /bionic/libc/kernel/tools/update_all.py 产生的, 只包含原始 Linux 内核头文件中的公共定义.
+                如果希望了解更多, 请参考 /bionic/libc/kernel/README.TXT 文件.
+
+        7. Android 特性
+            Bionic 提供了少部分 Android 特有功能.
+            (1) 访问系统属性
+                Android 提供了一个简单的 "共享键值对" 空间给系统中所有进程使用. 用来存储数量不限的"属性".
+                每个属性由一个限制长度的字符串"键" 和 一个限制长度的字符串"值" 组成.
+
+                头文件 <sys/_system_properties.h> 中定义了读取系统属性的函数, 也定义了键/值对的最大长度.
+                /bionic/libc/system_properties/system_properties.cpp
+                /bionic/libc/bionic/system_property_set.cpp
+                /bionic/libc/bionic/system_property_api.cpp
+                    #define _REALLY_INCLUDE_SYS__SYSTEM_PROPERTIES_H_
+                    #include <sys/_system_properties.h>
+                    #include <system_properties/prop_area.h>
+                    #include <system_properties/system_properties.h>
+
+            (2) Android 的用户/组管理
+                在 Android 中没有 /etc/passwd 和 /etc/groups 文件. Android 使用扩展的 Linux 用户/组管理特性, 以确保进程根据权限来对不同的文件系统目录进行访问.
+
+                Android 策略是: 每个已安装的应用都有自己的用户ID 和 组ID, ID 从 10000 开始, 小于 10000 的 ID 留给系统的守护进程.
+
+                tpwnam() 能识别一些硬编码的子进程名(如"radio"), 能将它们翻译成用户ID的值, 也能 "app_1234" 这样的组合名字, 知道将后面的 1234 加上 10000,
+                得到ID的值为 11234, getgrnam()也类似.
+        8. DNS 解析器
+        9. PThread 实时定时器
+        10. 二进制兼容性
+        11. 动态链接器
+        12. C++ 异常支持
+        13. 头文件包含路径
+
+
+
+
+
+    3.1.2 Bionic中的模块简介
+        Bionic 目录下一共有 5 个共享库: libc, libdl, libm, libstdc++ 和一个 linker 程序.
+        1. Libc 库
+            Libc 库是 C 语言最基础的库文件, 它提供了系统所有的基本功能, 这些功能主要来源于它对系统调用的封装, Libc 是应用和 Linux 内核交流的桥梁.
+            下面是 Libc 库中提供的主要功能列表:
+                进程管理
+                线程管理
+                内存管理
+                时间管理
+                时区管理
+                定时器管理
+                文件系统管理
+                文件管理
+                网络套接字
+                DNS 解析
+                信号
+                环境变量
+                Android Log
+                Android 属性
+                标准输入/输出
+                字符串
+                宽字符
+
+        2. Libdl 库
+            Libdl 库原本是用于动态库的装载, 但是 Android 的 Libdl 库中 dlopen(), dlclose(), dlsym()等函数的实现只是一个空壳,
+            应用进程使用的 dlopen()等函数, 实际上是在 linker 模块中实现的.
+
+        3. Libm 库
+            Libm 库是数学函数库, 提供了常见的数学函数和浮点运算功能. 但是 Android 中的浮点运算是通过软件实现的, 运行速度慢, 最好避免使用.
+
+        4. Libstdc++ 库
+            Libstdc++ 库是标准 c++ 的功能库. 但是 Android 的实现非常简单, 只是 new, delete等少数几个操作符的实现.
+
+        5. Linker 库
+            这个 linker 不是编译程序时用的 "链接器", 译程序时用到的链接器是 arm-elf-ld.
+            此处的 linker 功能是装载动态库以及库的重定位, 相当于 Linux 中的 ld.so, Android 没有使用 Linux 的 ld.so, 而是自己开发了这个 linker 程序,
+
+        本章将会对这个 linker 的实现做详细分析.
+
+
+
+3.2 Bionic C 库中的系统调用
+
+    3.2.1 系统调用简介
+        Linux 的系统调用就是 Linux 内核提供给用户进程使用的一套接口.
+        用户进程可以通过这些接口来获得 Linux 内核提供的服务, 例如打开和关闭文件, 启动和退出一个程序, 分配和释放内存等.
+        但是 Linux 的系统调用并不等同于普通的 API 调用.
+
+        现代 CPU 内部一般都实现了 特权等级(x86 CPU) 或 工作模式(arm CPU).
+
+        x86 CPU 包含 4 个特权级别 Ring0 ~ Ring3.
+        其中 Ring0 的权限最高, 可以使用任何CPU的指令, Linux 的内核代码就运行在这个级别下.
+        其中 Ring3 的权限最低, 很多CPU指令都被限制使用, 普通用户进程的代码就运行在Ring3下.
+
+        arm CPU 有 7 种工作模式:
+            用户模式(usr)       普通用户进程工作的模式, 权限比较受限
+            快速中断模式(fiq)
+            外部中断模式(irq)
+            管理模式(svc)       操作系统使用的保护模式
+            数据访问终止模式(abt)
+            系统模式(sys)       运行具有特权的操作系统任务
+            定义指令终止模式(und)
+
+        无论是 x86 的特权等级 还是 arm 的工作模式, 目的都是将系统内核和用户进程分开, 防止用户进程对系统内核进行 "破坏".
+        但是系统内核也必须能为用户进程提供 "服务", 否则用户进程就只能完成一些简单的计算任务.
+        如果说特权等级像一道围墙将内核和用户进程分开了, 那么系统调用就是在围墙上开的一个个窗口, 通过这些窗口, 用户进程能享受内核提供的各种服务.
+
+        用户程序如何才能使用系统调用呢?
+        x86 平台下, 应用程序使用软中断 int80 来调用系统功能
+        arm 平台则使用 swi 软中断.
+        同时, Linux 为每个系统调用都进行了编号(0 ~ NR_syscall), 并在内核中保存了一张系统调用表, 这张表中保存了 系统调用编号 和 它对应的服务例程,
+        因此, 只要将系统调用编号传入内核, 内核就能执行应用所需要的服务.
+
+        在 arm 平台中, Android 中的系统调用是通过 swi 的 0 号软中断来实现的, 例如 /bionic/libc/arch-arm/syscalls/__exit.S 文件中的内容:
+            /* Generated by gensyscalls.py. Do not edit. */
+            #include <private/bionic_asm.h>
+            ENTRY(__exit)
+                mov     ip, r7
+                .cfi_register r7, ip
+                ldr     r7, =__NR_exit
+                swi     #0
+                mov     r7, ip
+                .cfi_restore r7
+                cmn     r0, #(MAX_ERRNO + 1)
+                bxls    lr
+                neg     r0, r0
+                b       __set_errno_internal
+            END(__exit)
+        注:
+            寄存器 r7 用来传递系统调用编号, 参数则通过其余的寄存器传递.
+
+
+    3.2.2 系统调用的实现方法
+        源码目录 /bionic/libc/ 下的子目录列表如下:
+            /bionic/libc/arch-arm/
+            /bionic/libc/arch-arm64/
+            /bionic/libc/arch-common/
+            /bionic/libc/arch-mips/
+            /bionic/libc/arch-mips64/
+            /bionic/libc/arch-x86/
+            /bionic/libc/arch-x86_64/
+            /bionic/libc/async_safe/
+            /bionic/libc/bionic/
+            /bionic/libc/dns/
+            /bionic/libc/include/
+            /bionic/libc/kernel/
+            /bionic/libc/malloc_debug/
+            /bionic/libc/malloc_hooks/
+            /bionic/libc/private/
+            /bionic/libc/seccomp/
+            /bionic/libc/stdio/
+            /bionic/libc/stdlib/
+            /bionic/libc/system_properties/
+            /bionic/libc/tools/
+            /bionic/libc/tzcode/
+            /bionic/libc/upstream-freebsd/
+            /bionic/libc/upstream-netbsd/
+            /bionic/libc/upstream-openbsd/
+            /bionic/libc/versioner-dependencies/
+            /bionic/libc/SYSCALLS.TXT
+            
+            
+        在路径 /bionic/libc/arch-arm/syscalls/ 下存放的是系统调用的汇编代码(x86 和 mips 的实现代码在 arch-x86 和 arch-mips 目录下).
+
+        下面请看 /bionic/libc/arch-arm/syscalls/__exit.S 文件中的内容:
+            /* Generated by gensyscalls.py. Do not edit. */
+            #include <private/bionic_asm.h>
+            ENTRY(__exit)
+                mov     ip, r7
+                .cfi_register r7, ip
+                ldr     r7, =__NR_exit
+                swi     #0
+                mov     r7, ip
+                .cfi_restore r7
+                cmn     r0, #(MAX_ERRNO + 1)
+                bxls    lr
+                neg     r0, r0
+                b       __set_errno_internal
+            END(__exit)
+        注:
+            每个系统调用放在一个文件中, 每个文件中只有一小段的汇编代码实现, 称为 "syscall stub".
+            这些代码不是人工手写的, 它们是通过 perl 脚本工具 bionic/libc/tools/gensyscalls.py 读取 bionic/libc 目录下的 SYSCALL.TXT 文件自动生成的.
+
+        SYSCALL.TXT 中包含了一份所有将要生成的系统调用列表, 对应的系统调用ID以及它们的签名.
+
+        下面先看看这个文件的内容, 代码路径 bionic/libc/SYSCALLS.TXT:
+            void _exit|_Exit:exit_group(int)  all
+            void __exit:exit(int)  all
+
+            int epoll_create1(int)  all
+            int epoll_ctl(int, int op, int, struct epoll_event*)  all
+            int __epoll_pwait:epoll_pwait(int, struct epoll_event*, int, int, const sigset64_t*, size_t)  all
+
+            pid_t wait4(pid_t, int*, int, struct rusage*)  all
+            int __waitid:waitid(int, pid_t, struct siginfo_t*, int, void*)  all
+
+            SYSCALLS.TXT 文件中每行的格式为:
+            return_type func_name[|alias_list][:syscall_name[:socketcall_id]]([parameter_list]) arch_list
+        注:
+            上面格式被空格分成了 3 个区域:
+            (1) 第一个区域是返回值
+            (2) 第二个区域是函数名和参数
+                func_name 是指函数的名称, 也是被 C 程序调用时的名称
+
+                syscall_name 是指系统调用的名称, 这个是一个内部名称, 和 func_name 可能不一样, 主要用来生成系统编号的宏定义.
+                生成宏定义的方法是在 syscall_name 前面加上字符串 "__NR_". 例如 _exit 函数的系统编号的宏定义是 __NR_exit_group. 这些宏是在 Linux Kernel 的代码中定义的.
+
+                socketcall_id 是指系统调用的编号, 一般不用列出, 通过前面的 syscall_name 生成的宏定义可以得到系统调用编号.
+
+                parameter_list 是指参数的编号.
+
+
+
 3.3 Bionic中的内存管理函数
-3.3.1 系统调用brk和mmap
-3.3.2 内存分配器——dlmalloc
-简介
-3.3.3 dlmalloc函数用法指南
+    对于 32 位的系统, 能使用的最大地址空间是4GB, 其中的地址空间 0~3GB 分配给用户进程使用, 地址空间 3GB~4GB 由内核使用.
+    但是用户进程并不是在启动时就获得了对所有 0~3GB 地址空间的访问权利, 而是需要事先向内核申请对某块地址空间的读写权利, 而且申请的只是地址空间而已, 此时并没有分配真实的物理内存.
+    只有当进程访问某个地址时, 如果该地址对应的物理页面不存在, 则由内核产生缺页中断, 在中断中才会分配物理内存并建立页表.
+    如果用户进程不需要某块地址空间了, 可以通过内核释放掉它们, 对应的物理内存也将同时释放掉.
+
+    但是缺页中断运行慢, 如果频繁的由内核来分配和释放内存将会降低整个系统的性能, 因此, 一般操作系统都会在用户进程中提供地址空间的分配和回收机制.
+    用户进程中的内存管理器会预先向内核申请一块大的地址空间, 称为堆. 当用户进程需要分配内存时, 由内存管理器从堆中寻找一块空闲的内存分配给用户进程使用.
+    当用户进程释放某块内存时, 内存管理器并不会立刻将它们交给内核释放, 而是放入空闲列表中, 留待下次分配使用.
+
+    内存管理器会动态地调整堆的大小. 如果堆的空间使用完了, 内存管理器会向内核申请更多的地址空间, 如果堆中的空闲空间太多, 内存管理器也会将一部分空间返给内核.
+
+
+    3.3.1 系统调用 brk 和 mmap
+        Linux 中有两种方式来申请和释放内存空间, 一种方式是使用系统调用 brk, 另一种方式是使用系统调用 mmap 和 munmap.
+
+        Linux 内核通常会将用户地址空间划分成一些大的区域, 如代码区, 数据区, 堆区和栈区, 如图 3.1 所示.
+
+
+    3.3.2 内存分配器 —— dlmalloc 简介
+        Bionic 的内存管理使用的是 dlmalloc, dlmalloc 的代码位于目录 bionic/libc/, 只有一个 c 文件 malloc.c.
+
+        /external/dlmalloc/malloc.c void* dlmalloc(size_t bytes) {
+
+        未完待续......
+
+
+    3.3.3 dlmalloc函数用法指南
+        未完待续......
+
+
+
 3.4 管道
-3.4.1 匿名管道PIPE和命名
-管道FIFO
-3.4.2 匿名管道的使用方法
+    管道(Pipe) 是从 Unix 系统出现的一种进程间通信手段, 分为匿名管道和命名管道.
+
+    管道的本质是一段共享内存区, 由内核管理的一个缓冲区, 进程把共享消息放在那里, 并通过一些 API 提供信息交换.
+
+    如果你使用过 Linux 的命令, 那么对于管道这个名词你一定不会感觉到陌生.
+
+    我们通常通过符号"|"来使用管道, 但是管道的真正定义是什么呢?
+    管道是一个进程连接数据流到另一个进程的通道, 它通常用作把一个进程的输出通过管道连接到另一个进程的输入。
+
+    下面举例说明什么是管道, 对于 Linux 命令 ls -l | grep string
+    ls命令（ls 其实也是一个进程）会把当前目录中的文件都列出来, 但是它不会直接输出, 而是把本来要输出到屏幕上的数据通过管道输出到 grep 这个进程中, 作为 grep 进程的输入, 然后 grep 进程对输入的信息进行筛选, 把存在string的信息的字符串打印在屏幕上。
+
+
+    3.4.1 匿名管道 PIPE 和 命名管道 FIFO
+        1. 匿名管道
+            匿名管道只能用于父子进程间的通信, 这和匿名管道的实现院里有关系. 创建匿名管道会在内核建立一个内存文件(这个文件在文件系统中不可见) 和 两个文件描述符,
+            管道使用者通过这两个文件描述符来读写内存文件中的数据, 从而达到信息交换的目的. 但是通常情况下文件描述符不能在进程间传递(Android 的 Binder 能够实现),
+            只有父子进程或兄弟进程可以通过继承的方式来共享文件描述符, 因此, 匿名管道只能用于父子或兄弟进程间的通信.
+            匿名管道:进程A --> 内核缓存区 --> 进程B
+
+            管道是半双工的，数据只能从一端到另一端, 向一个方向流动; 管道两端的进程将管道看成同一个文件, 一个进程负责向管道中写, 另一个进程则从管道中往外读取; 如果进程间需要双向通信, 则必须建立起两条管道.
+
+        2. 命名管道
+            创建命名管道会在磁盘文件系统中建立一个 inode 节点, 但是没有磁盘快. 通过文件系统可以看见命名管道创建的文件节点, 但是所有数据还是保存在内存中.
+            文件节点起到的作用就是系统范围内的唯一标识符, 这样不同的进程都能通过它来打开同一个管道, 从而在不同进程间传递信息.
+
+            注意:
+                Android 支持匿名管道, 不支持命名管道.
+
+
+    3.4.2 匿名管道的使用方法
+        1. 创建管道
+            创建一个匿名管道的函数原型定义如下, 代码路径 /bionic/libc/include/unistd.h
+                int pipe(int fds[2]);
+            注:
+                pipe()函数要求传入一个数组, 用来返回它创建的2个文件描述符, 创建成功返回0. 其中 fds[0] 用于读缓冲区, fds[1] 用于写缓冲区.
+                调用 pipe() 函数会在内核中开辟一块大小为一页(4KB) 的环形缓冲区, "写"进程不断地向缓存区追加数据, "读"进程则不断地移走数据.
+
+        2. 读管道
+            从管道读数据使用普通的文件函数 read(), 原型如下:
+                ssize_t read(int fd, void* buffer, size_t count);
+            注意:
+                如果 fd 是阻塞式的, 调用 read() 时如果缓冲区内没有数据 或者 缓冲区内的数据量小于请求的数据量, 线程将会挂起.
+
+        3. 写数据
+            向管道写数据使用普通的文件函数 write(), 原型如下:
+                ssize_t write(int fd, const void* buffer, size_t count);
+            注意:
+                如果句柄 fd 是阻塞式的, 调用 write() 时如果缓冲区内数据已写满, 线程将会被挂起.
+                如果管道"读端"的句柄被关闭, 执行写操作的进程将接收到一个 SIGPIPE 信号. 如果管道"写端"的句柄被关闭了, read()函数将返回0.
+
+        4. 改变管道的阻塞方式
+            open() 函数可以指定参数 O_NONBLOCK 来使打开文件的读写为非阻塞式, 但是管道并不是调用 open() 函数打开的, 因此不能使用这种方法来改变管道的阻塞方式.
+
+            如果需要, 可以用函数 fcntl() 来完成同样的工作, 如下所示:
+                fcntl = import_module('fcntl')
+                fcntl(fd, F_SETFL, O_NONBLOCK)
+                rv = fcntl.fcntl(self.f.fileno(), fcntl.F_SETFL, os.O_NONBLOCK)
+            通过这个函数来控制管道读写时是否需要阻塞.
+
+
+
 3.5 Bionic中的线程管理函数
-3.5.1 Bionic线程函数的特性
-3.5.2 创建线程和线程的属性
-3.5.3 退出线程的方法
-3.5.4 线程本地存储TLS
-3.5.5 线程的互斥量（Mutex）
-函数
-3.5.6 线程的条件量（Condition）
-函数
-3.6 Futex同步机制
-3.6.1 Futex的系统调用
-3.6.2 Futex的用户态操作
-3.6.3 Mutex类使用Futex
-实现同步
+    Bionic 中的线程管理函数和通用 Linux 版本的实现有很多差异, Android 根据自己的需要做了很多裁剪工作.
+
+    3.5.1 Bionic线程函数的特性
+        未完待续......
+
+
+    3.5.2 创建线程和线程的属性
+        1. 创建线程
+            函数 pthread_create() 用来创建线程, 原型是:
+                /bionic/libc/bionic/pthread_create.cpp
+                /bionic/libc/include/pthread.h
+                /bionic/libc/include/bits/pthread_types.h
+
+                int pthread_create(pthread_t* thread, pthread_attr_t const* attr, void* (*start_routine)(void*), void* arg)
+                注:
+                    参数 thread 是一个指针, pthread_create() 函数执行成功后, 会将代表线程的值写入其指向的变量.
+                    参数 attr 一般情况下为 NULL, 表示使用缺省值.
+                    参数 start_routine 是线程的执行函数.
+                    参数 arg 是传入线程执行函数的参数.
+                注意:
+                    pthread_create 调用成功后线程已经创建完毕, 但是不会立刻发生线程切换. 除非调用线程主动放弃执行, 否则只能等待线程调度.
+
+        2. 线程的属性
+            下面看 pthread_t 和 pthread_attr_t 在文件 pthread_types.h 中的定义如下:
+                // 可以看出 pthread_t 在 Android 中等同于 long 类型
+                typedef long pthread_t;
+
+                // 结构体 pthread_attr_t 用来设置线程的一些属性
+                typedef struct {
+                  uint32_t flags;
+                  void* stack_base;         // 指定栈的初始地址
+                  size_t stack_size;        // 指定栈的大小
+                  size_t guard_size;
+                  int32_t sched_policy;     // 线程的调度方式
+                  int32_t sched_priority;   // 线程的优先级
+                } pthread_attr_t;
+
+        使用属性时要先初始化, 函数原型是:
+            int pthread_attr_init(pthread_attr_t* attr);
+
+        pthread_attr_init() 函数的缺省属性值设置如下, 代码路径 /bionic/libc/bionic/pthread_attr.cpp
+            int pthread_attr_init(pthread_attr_t* attr) {
+                attr->flags = 0;
+                attr->stack_base = NULL;
+                attr->stack_size = PTHREAD_STACK_SIZE_DEFAULT;      // 缺省栈略小于1MB
+                attr->guard_size = PTHREAD_GUARD_SIZE;              // 大小为 4096
+                attr->sched_policy = SCHED_NORMAL;                  // 普通调度方式
+                attr->sched_priority = 0;                           // 中等优先级
+                return 0;
+            }
+            缺省常量值的定义文件及路径:
+                /bionic/libc/bionic/pthread_internal.h
+                /bionic/libc/include/sys/user.h
+                #define PAGE_SIZE 4096
+                #define PAGE_MASK (~(PAGE_SIZE - 1))
+                #define PTHREAD_GUARD_SIZE PAGE_SIZE
+                #define SIGNAL_STACK_SIZE_WITHOUT_GUARD (16 * 1024)
+                #define PTHREAD_STACK_SIZE_DEFAULT ((1 * 1024 * 1024) - SIGNAL_STACK_SIZE_WITHOUT_GUARD)
+                #define SIGNAL_STACK_SIZE (SIGNAL_STACK_SIZE_WITHOUT_GUARD + PTHREAD_GUARD_SIZE)
+
+        下面看 pthread_attr_t 每项属性的含义:
+            (1) flags           用来表示线程的分离状态
+            (2) stack_base      线程栈的基地址
+            (3) stack_size      线程栈的大小
+            (4) guard_size      线程的栈溢出保护区大小
+            (5) sched_policy    线程的调度方式
+            (6) sched_priority  线程的优先级
+        注:
+            Linux 线程有两种状态: 分离(detach)状态 和 非分离(joinable)状态.
+            如果线程是非分离状态, 当线程函数退出时或者调用 pthread_exit()时都不会释放线程所占用的系统资源.
+            如果是分离状态的线程, 这些资源在线程函数退出时或者调用 pthread_exit()时会自动释放.
+
+            线程一共有 3 种调度方式: SCHED_NORMAL, SCHED_FIFO 和 SCHED_RR.
+            SCHED_NORMAL    分时调度策略
+            SCHED_FIFO      实时调度策略, 先到先服务. 一旦占用 CPU 则一直运行, 一直运行到有更高优先级任务到达或自己放弃.
+            SCHED_RR        实时调度策略, 时间片轮转. 当进程的时间片用完, 系统将重新分配时间片, 并置于就绪队列尾部.
+
+        Bionic 虽然也实现了 pthread_attr_setscope()函数, 但是只支持 pthread_scope_system 属性, 这意味着 Android 的线程将在全系统的范围内竞争 CPU 资源.
+
+
+    3.5.3 退出线程的方法
+        一般情况下, 线程运行函数结束时线程才退出. 但是如果需要, 也可以在线程运行函数中调用 pthread_exit() 函数来主动退出线程运行.
+        pthread_exit() 函数原型如下:
+            void pthread_exit(void* retval)
+        参数 retval 用来设置返回值.
+
+        但是如果希望在其他线程中结束某个线程呢? 前面介绍了 Android 不支持 pthread_cancel() 函数, 因此, 不能在 Android  中使用这个函数来结束线程.
+        一种方法是, 如果线程在一个循环中不停的运行, 可以在每次循环中检查一个初始值为 false 的全局变量, 一旦这个变量的值变为 true 就主动退出, 这样其他线程就可以通过改变这个全局变量的值来控制线程的退出.
+        这种方法实现起来简单可靠, 在编程中经常使用, 但它的缺点是: 如果线程处于挂起等待状态, 这种方法就不适用了.
+        下面是一个例子:
+            未完待续......
+
+        另一种复杂点的方法是使用 pthread_kill() 函数, pthread_kill() 函数的作用不是 "杀死" 一个线程, 而是给线程发送信号, 函数原型如下:
+            int pthread_kill(pthread_t tid, int sig)
+        下面看一个使用pthread_kill() 函数的例子:
+            未完待续......
+        即使线程处于挂起状态, 也可以使用 pthread_kill() 函数来给线程发送消息并使得线程执行处理函数.
+        使用 pthread_kill() 函数的问题是: 线程如果在信号处理函数中退出, 不方便释放在线程的运行函数中分配的资源.
+
+        更复杂的方法是: 创建一个管道, 在线程的运行函数对管道的 "读端" 用 select() 或 epoll() 进行监听, 没有数据则挂起线程.
+        通过管道的 "写端" 写入数据, 就能唤醒线程, 从而释放资源, 主动退出.
+
+        下面是具体的实现:
+            未完待续......
+
+        这几种退出线程的方法可以灵活使用, 在 Android 的代码中也能经常看到类似的例子.
+
+
+    3.5.4 线程本地存储 TLS
+        线程本地存储(TLS) 用来保存, 传递和线程有关的数据. 例如在前面使用 pthread_kill() 函数关闭线程的例子中, 需要释放的资源可以使用 TLS 传递给信号处理函数.
+
+        TLS 在线程实例中是全局可见的, 对某个线程实例而言 TLS 是这个线程实例的私有全局变量. 同一个线程运行函数的不同运行实例, 它们的 TLS 是不同的.
+        在这点上 TLS 和线程的关系有点类似栈变量和函数的关系. 栈变量在函数退出时会消失, TLS 也会在线程结束时释放.
+
+        Android 实现 TLS 的方式是在线程栈的顶部开辟一块区域来存放 TLS 项, 当然这块区域不再受线程栈的控制.
+
+        TLS 的内存区域按数组方式管理, 每个数组元素称为一个 slot.
+
+
+
+    3.5.5 线程的互斥量（Mutex）函数
+        /bionic/libc/bionic/pthread_atfork.cpp
+        /bionic/libc/bionic/pthread_attr.cpp
+        /bionic/libc/bionic/pthread_barrier.cpp
+        /bionic/libc/bionic/pthread_cond.cpp
+        /bionic/libc/bionic/pthread_create.cpp
+        /bionic/libc/bionic/pthread_detach.cpp
+        /bionic/libc/bionic/pthread_equal.cpp
+        /bionic/libc/bionic/pthread_exit.cpp
+        /bionic/libc/bionic/pthread_getcpuclockid.cpp
+        /bionic/libc/bionic/pthread_getschedparam.cpp
+        /bionic/libc/bionic/pthread_gettid_np.cpp
+        /bionic/libc/bionic/pthread_internal.cpp
+        /bionic/libc/bionic/pthread_internal.h
+        /bionic/libc/bionic/pthread_join.cpp
+        /bionic/libc/bionic/pthread_key.cpp
+        /bionic/libc/bionic/pthread_kill.cpp
+        /bionic/libc/bionic/pthread_mutex.cpp
+        /bionic/libc/bionic/pthread_once.cpp
+        /bionic/libc/bionic/pthread_rwlock.cpp
+        /bionic/libc/bionic/pthread_self.cpp
+        /bionic/libc/bionic/pthread_setname_np.cpp
+        /bionic/libc/bionic/pthread_setschedparam.cpp
+        /bionic/libc/bionic/pthread_spinlock.cpp
+
+
+        Linux 线程提供了一组函数用于线程间的互斥访问, Android 中的 Mutex 类实质上是对 Linux 互斥函数的封装.
+        互斥量可以理解为一把锁, 在进入某个保护区域前要先检查是否已经上锁了.
+        如果没有上锁就可以进入, 否则就必须等待. 进入后先将锁锁上, 这样别的线程就无法再进入了, 退出保护区域后要解锁, 其他线程在可以继续使用.
+
+        代码路径: /bionic/libc/bionic/pthread_mutex.cpp
+
+        1. Mutex 在使用前需要初始化
+            初始化函数 pthread_mutex_init() 的原型是如下:
+                int pthread_mutex_init(pthread_mutex_t* mutex_interface, const pthread_mutexattr_t* attr)
+
+            互斥量的属性主要由两种: 类型(type) 和 范围(scope), 这是和获取属性的函数如下:
+                int pthread_mutexattr_gettype(const pthread_mutexattr_t *attr, int *type_p)
+                int pthread_mutexattr_settype(pthread_mutexattr_t *attr, int type)
+                int pthread_mutexattr_setpshared(pthread_mutexattr_t *attr, int  pshared)
+                int pthread_mutexattr_getpshared(const pthread_mutexattr_t* attr, int* pshared)
+                int pthread_mutexattr_setprotocol(pthread_mutexattr_t* attr, int protocol)
+                int pthread_mutexattr_getprotocol(const pthread_mutexattr_t* attr, int* protocol)
+                int pthread_mutexattr_init(pthread_mutexattr_t *attr)
+                int pthread_mutexattr_destroy(pthread_mutexattr_t *attr)
+
+            互斥量的类型有 3 种:
+                #define  MUTEX_TYPE_BITS_NORMAL      MUTEX_TYPE_TO_BITS(PTHREAD_MUTEX_NORMAL)
+                #define  MUTEX_TYPE_BITS_RECURSIVE   MUTEX_TYPE_TO_BITS(PTHREAD_MUTEX_RECURSIVE)
+                #define  MUTEX_TYPE_BITS_ERRORCHECK  MUTEX_TYPE_TO_BITS(PTHREAD_MUTEX_ERRORCHECK)
+
+            互斥量的作用范围有 2 种:
+                PTHREAD_PROCESS_PRIVATE     互斥量的作用范围是进程内, 这是缺省的属性值
+                PTHREAD_PROCESS_SHARED      互斥量可以用于进程间线程的同步
+
+        2. 如果不再需要 Mutex, 可以将它销毁掉
+            函数原型是:
+                int pthread_mutexattr_destroy(pthread_mutexattr_t *attr)
+            注意:
+                在销毁前, 互斥量必须处于未锁定的状态, 否则会报错.
+
+        3. 在进入保护区域前, 需要先上锁
+            上锁函数的原型是:
+                int pthread_mutex_lock(pthread_mutex_t* mutex_interface)
+            注意:
+
+        4. 如果不希望线程被挂起
+            可以使用下面的函数来测试是否已经上锁:
+                int pthread_mutex_trylock(pthread_mutex_t* mutex_interface)
+            注意:
+
+        5. 上锁时也可以设置一个等待时间
+            函数原型是:
+                int pthread_mutex_timedlock(pthread_mutex_t* mutex_interface, const struct timespec* abs_timeout)
+            注意:
+
+        6. 在离开保护区域后, 需要释放锁
+            函数原型是:
+                int pthread_mutex_unlock(pthread_mutex_t* mutex_interface)
+            注意:
+                在 Android 中不要在没有得到锁的情况下调用释放锁的函数, 也不要释放在另外线程中锁定的互斥量, 否则可能导致死锁.
+
+
+    3.5.6 线程的条件量（Condition）函数
+        1. 条件量在使用前需要初始化, 函数原型是:
+            int pthread_cond_init(pthread_cond_t* cond_interface, const pthread_condattr_t* attr)
+
+        2. 使用完成后需要销毁, 函数原型是:
+            int pthread_cond_destroy(pthread_cond_t* cond_interface)
+
+        3. 条件量的属性主要由两种: 共享(pshared) 和 定时(clock), 下面是和属性的函数原型:
+            int pthread_condattr_init(pthread_condattr_t* attr)
+            int pthread_condattr_destroy(pthread_condattr_t* attr)
+
+            int pthread_condattr_getpshared(const pthread_condattr_t* attr, int* pshared)
+            int pthread_condattr_setpshared(pthread_condattr_t* attr, int pshared)
+            int pthread_condattr_getclock(const pthread_condattr_t* attr, clockid_t* clock)
+            int pthread_condattr_setclock(pthread_condattr_t* attr, clockid_t clock)
+            注:
+                共享的属性值有 2 种:
+                PTHREAD_PROCESS_PRIVATE     条件量的作用范围是进程内, 这是缺省的属性值
+                PTHREAD_PROCESS_SHARED      条件量可以用于进程间的线程同步
+
+        4. 条件量的等待函数原型如下:
+            int pth
+            read_cond_wait(pthread_cond_t* cond_interface, pthread_mutex_t* mutex)
+            int pthread_cond_timedwait(pthread_cond_t *cond_interface, pthread_mutex_t * mutex, const timespec *abstime)
+            注:
+                条件量的等待函数会先解锁互斥量, 因此, 使用前一定要确保 mutex 已经锁上. 锁上后线程将挂起.
+                pthread_cond_timedwait() 用在希望线程等待一段时间的情况下, 如果时间到了线程就会恢复运行.
+
+        5.  可以使用函数 pthread_cond_signal() 来唤醒等待队列中的一个线程, 函数原型如下:
+            int pthread_cond_signal(pthread_cond_t* cond_interface)
+
+        6.  可以使用函数 pthread_cond_broadcast() 来唤醒所有的线程, 函数原型如下:
+            int pthread_cond_broadcast(pthread_cond_t* cond_interface)
+
+
+
+
+3.6 Futex 同步机制
+    Futex 是 fast userspace mutex 的缩写, 意思是快速用户空间互斥体.
+
+    这里讨论 Futex 是因为在 Android 中不但线程函数使用了 Futex, 甚至一些模块中也直接使用 Futex 作为进程间同步的手段, 了解 Futex 的原理有助于我们理解这些模块的运行机制.
+
+    Futex 是一种用户态和内核态混合的同步机制, 使用 Futex 同步机制, 如果用于进程间同步, 需要先调用 mmap() 创建一块共享内存, Futex 变量就位于共享区,
+    同时对 Futex 变量的操作必须是原子的, 当进程试图进入临界区或者退出临界区的时候, 首先检查共享内存中的 Futex 变量, 如果没有其他进程也申请使用临界区,
+    则只修改 Futex 变量, 而不再执行系统调用. 如果同时有其他进程在申请使用临界区, 还是需要通过系统调用去执行等待或唤醒操作.
+
+    这样通过用户态的 Futex 变量的同步机制, 减少了进程在用户态和内核态之间的切换次数, 从而最大程度降低了系统同步的开销.
+
+
+    /bionic/libc/bionic/bionic_arc4random.cpp
+    /bionic/libc/bionic/bionic_futex.cpp
+    /bionic/libc/bionic/bionic_netlink.cpp
+    /bionic/libc/bionic/bionic_netlink.h
+    /bionic/libc/bionic/bionic_systrace.cpp
+    /bionic/libc/bionic/bionic_time_conversions.cpp
+
+
+    3.6.1 Futex的系统调用
+        在 bionic 中, 提供了下列函数来包装 Futex 系统调用, /bionic/libc/private/bionic_futex.h
+            static inline int __futex(volatile void* ftx, int op, int value, const timespec* timeout, int bitset)
+
+            static inline int __futex_wake(volatile void* ftx, int count)
+            static inline int __futex_wait(volatile void* ftx, int value, const timespec* timeout)
+
+            // 多了一个参数 shared
+            static inline int __futex_wake_ex(volatile void* ftx, bool shared, int count)
+            static inline int __futex_wait_ex(volatile void* ftx, bool shared, int value)
+            static inline int __futex_pi_unlock(volatile void* ftx, bool shared)
+
+            __LIBC_HIDDEN__ int __futex_wait_ex(volatile void* ftx, bool shared, int value, bool use_realtime_clock, const timespec* abs_timeout);
+            __LIBC_HIDDEN__ int __futex_pi_lock_ex(volatile void* ftx, bool shared, bool use_realtime_clock, const timespec* abs_timeout);
+        注:
+            参数 shared 的值为 true 表示 wake 和 wait 操作是用于进程间的挂起和唤醒.
+            参数 shared 的值为 false 表示 wake 和 wait 操作是用于进程内线程的挂起和唤醒.
+
+        Android 中操作码的定义如下, 文件路径 /bionic/libc/kernel/uapi/linux/futex.h:
+        #define FUTEX_WAIT 0
+        #define FUTEX_WAKE 1
+        #define FUTEX_FD 2
+        #define FUTEX_REQUEUE 3
+        #define FUTEX_CMP_REQUEUE 4
+        #define FUTEX_WAKE_OP 5
+        #define FUTEX_LOCK_PI 6
+        #define FUTEX_UNLOCK_PI 7
+        #define FUTEX_TRYLOCK_PI 8
+        #define FUTEX_WAIT_BITSET 9
+        #define FUTEX_WAKE_BITSET 10
+        #define FUTEX_WAIT_REQUEUE_PI 11
+        #define FUTEX_CMP_REQUEUE_PI 12
+        #define FUTEX_PRIVATE_FLAG 128
+        #define FUTEX_CLOCK_REALTIME 256
+        #define FUTEX_CMD_MASK ~(FUTEX_PRIVATE_FLAG | FUTEX_CLOCK_REALTIME)
+        #define FUTEX_WAIT_PRIVATE (FUTEX_WAIT | FUTEX_PRIVATE_FLAG)
+        #define FUTEX_WAKE_PRIVATE (FUTEX_WAKE | FUTEX_PRIVATE_FLAG)
+        #define FUTEX_REQUEUE_PRIVATE (FUTEX_REQUEUE | FUTEX_PRIVATE_FLAG)
+        #define FUTEX_CMP_REQUEUE_PRIVATE (FUTEX_CMP_REQUEUE | FUTEX_PRIVATE_FLAG)
+        #define FUTEX_WAKE_OP_PRIVATE (FUTEX_WAKE_OP | FUTEX_PRIVATE_FLAG)
+        #define FUTEX_LOCK_PI_PRIVATE (FUTEX_LOCK_PI | FUTEX_PRIVATE_FLAG)
+        #define FUTEX_UNLOCK_PI_PRIVATE (FUTEX_UNLOCK_PI | FUTEX_PRIVATE_FLAG)
+        #define FUTEX_TRYLOCK_PI_PRIVATE (FUTEX_TRYLOCK_PI | FUTEX_PRIVATE_FLAG)
+        #define FUTEX_WAIT_BITSET_PRIVATE (FUTEX_WAIT_BITSET | FUTEX_PRIVATE_FLAG)
+        #define FUTEX_WAKE_BITSET_PRIVATE (FUTEX_WAKE_BITSET | FUTEX_PRIVATE_FLAG)
+        #define FUTEX_WAIT_REQUEUE_PI_PRIVATE (FUTEX_WAIT_REQUEUE_PI | FUTEX_PRIVATE_FLAG)
+        #define FUTEX_CMP_REQUEUE_PI_PRIVATE (FUTEX_CMP_REQUEUE_PI | FUTEX_PRIVATE_FLAG)
+
+    3.6.2 Futex 的用户态操作
+        Futex 变量值为 0 表示无锁状态, 1 表示有锁无竞争状态, 2 表示有竞争的状态.
+
+
+
+    3.6.3 Mutex 类使用 Futex 实现同步
+        pthread_mutex_lock() --> NormalMutexTryLock(mutex, shared)
+
+        (1) 在 Bionic 的实现中, pthread_mutex_lock()调用了内部函数 _normal_lock() 来实现上锁功能, 代码如下:
+
+        (2) 在 Bionic 的实现中, pthread_mutex_unlock() 调用了内部函数 _normal_unlock() 来实现解锁功能, 代码如下:
+
+
+
+
 3.7 Android的 Log模块
-3.7.1 Android Log系统的架构
-3.7.2 Log系统的接口和用法
-3.7.3 Log系统的实现分析
+    3.7.1 Android Log系统的架构
+    3.7.2 Log系统的接口和用法
+    3.7.3 Log系统的实现分析
+
+
+
 3.8 可执行文件格式分析
 3.8.1 ELF格式简介
 3.8.2 ELF文件头格式
 3.8.3 程序头部表
-3.8.4 与重定位相关的“节区”的
-信息——DYNAMIC段
+3.8.4 与重定位相关的“节区”的信息——DYNAMIC段
 3.8.5 函数的重定位过程
+
+
+
 3.9 Bionic中的Linker模块
 3.9.1 可执行程序的装载
 3.9.2 可执行程序的初始化
 3.9.3 Linker装载动态库
+
+
+
 3.10 调试器——Ptrace和Hook API
 3.10.1 ptrace函数简介
 3.10.2 Hook API的原理
-3.10.3 利用ptrace实现
-Hook API 
+3.10.3 利用ptrace实现 Hook API

@@ -1,7 +1,7 @@
 第16章 Android 的输入管理
 
 
-本章将介绍Android的input事件输入系统, 输入管理模块InputManagerService(以下简称IMS), 以及输入消息的分发过程.
+本章将介绍 Android 的 input 事件输入系统, 输入管理模块 InputManagerService(以下简称IMS), 以及输入消息的分发过程.
 
 
 16.1 IMS-管理各种输入的服务
@@ -772,6 +772,7 @@ https://www.cnblogs.com/xdlltao/p/5833253.html
     public abstract class InputEvent implements Parcelable {
     public class KeyEvent extends InputEvent implements Parcelable {
     public final class MotionEvent extends InputEvent implements Parcelable {
+
 其中MotionEvent类的概述如下:
      * Motion events describe movements in terms of an action code and a set of axis values.
      * The action code specifies the state change that occurred such as a pointer going

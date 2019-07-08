@@ -5,9 +5,10 @@
 为移动设备设计的CPU大都有两种工作频率, 为了省电, 大部分时间CPU都工作在较低的频率下, 只有进行密集计算时, 如视频解码时, 才会切换到高频状态.
 显示屏省电的方法是尽量减少亮屏时间, 但是, 显示屏的开关和应用有很大关系, 因此, 系统需要有一套机制来控制显示屏的开关和亮度, 这也是电源管理的主要工作之一.
 
-PowerManagerService中使用到了BatteryService, BatteryService中使用的 batterypropreg 服务位于 healthd 守护进程中,
+PowerManagerService 中使用到了 BatteryService, BatteryService 中使用的 batterypropreg 服务位于 healthd 守护进程中.
+
 Health daemon(后台驻留程序)
-此处需要确认healthd 守护进程是不是在 init进程中启动, 还有 healthd 守护进程的作用.
+此处需要确认 healthd 守护进程是不是在 init 进程中启动, 还有 healthd 守护进程的作用.
 
 
 17.1 电源管理服务 - PowerManagerService

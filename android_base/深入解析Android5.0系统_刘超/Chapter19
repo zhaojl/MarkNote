@@ -11,6 +11,7 @@ Android 的网络连接管理系统一直都由四个service组成:
         NetworkPolicyManagerService 通过 NetworkPolicyManager 对外提供SDK接口.
         ConnectivityService 通过 ConnectivityManager 对外提供SDK接口
 
+netd 的全称是 network daemon, netd 是一个守护进程, 主要作用是管理各种网络设备.
 
 下面是简易的结构关系图, 整体的框架图请参照network.jpeg:
              UEvent                socket                                                              NetworkPolicyManagerService

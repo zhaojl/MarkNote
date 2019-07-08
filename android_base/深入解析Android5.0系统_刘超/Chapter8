@@ -1,9 +1,233 @@
 第8章 支撑 Android 世界的一极—— Zygote 进程
 
+com.android.internal.os.ZygoteInit
+    import dalvik.system.DexFile;
+    import dalvik.system.VMRuntime;
+    import dalvik.system.ZygoteHooks;
+    import libcore.io.IoUtils;
+
+    /**
+     * Class not instantiable.
+     */
+    private ZygoteInit() {
+    }
+
+    public static final Runnable zygoteInit(int targetSdkVersion, String[] argv, ClassLoader classLoader) {
+        if (RuntimeInit.DEBUG) {
+            Slog.d(RuntimeInit.TAG, "RuntimeInit: Starting application from zygote");
+        }
+
+        Trace.traceBegin(Trace.TRACE_TAG_ACTIVITY_MANAGER, "ZygoteInit");
+        RuntimeInit.redirectLogStreams();
+
+        RuntimeInit.commonInit();
+        ZygoteInit.nativeZygoteInit();
+        return RuntimeInit.applicationInit(targetSdkVersion, argv, classLoader);
+    }
+
+    public static void main(String argv[]) {
+        zygoteServer.registerServerSocketFromEnv(socketName);
+        caller = zygoteServer.runSelectLoop(abiList);
+    }
+
+    public static void main(String argv[]) {
+        ZygoteServer zygoteServer = new ZygoteServer();
+
+        // Mark zygote start. This ensures that thread creation will throw
+        // an error.
+        ZygoteHooks.startZygoteNoThreadCreation();
+
+        // Zygote goes into its own process group.
+        try {
+            Os.setpgid(0, 0);
+        } catch (ErrnoException ex) {
+            throw new RuntimeException("Failed to setpgid(0,0)", ex);
+        }
+
+        final Runnable caller;
+        try {
+            // Report Zygote start time to tron unless it is a runtime restart
+            if (!"1".equals(SystemProperties.get("sys.boot_completed"))) {
+                MetricsLogger.histogram(null, "boot_zygote_init",
+                        (int) SystemClock.elapsedRealtime());
+            }
+
+            String bootTimeTag = Process.is64Bit() ? "Zygote64Timing" : "Zygote32Timing";
+            TimingsTraceLog bootTimingsTraceLog = new TimingsTraceLog(bootTimeTag,
+                    Trace.TRACE_TAG_DALVIK);
+            bootTimingsTraceLog.traceBegin("ZygoteInit");
+            RuntimeInit.enableDdms();
+
+            boolean startSystemServer = false;
+            String socketName = "zygote";
+            String abiList = null;
+            boolean enableLazyPreload = false;
+            for (int i = 1; i < argv.length; i++) {
+                if ("start-system-server".equals(argv[i])) {
+                    startSystemServer = true;
+                } else if ("--enable-lazy-preload".equals(argv[i])) {
+                    enableLazyPreload = true;
+                } else if (argv[i].startsWith(ABI_LIST_ARG)) {
+                    abiList = argv[i].substring(ABI_LIST_ARG.length());
+                } else if (argv[i].startsWith(SOCKET_NAME_ARG)) {
+                    socketName = argv[i].substring(SOCKET_NAME_ARG.length());
+                } else {
+                    throw new RuntimeException("Unknown command line argument: " + argv[i]);
+                }
+            }
+
+            if (abiList == null) {
+                throw new RuntimeException("No ABI list supplied.");
+            }
+
+            zygoteServer.registerServerSocketFromEnv(socketName);
+            // In some configurations, we avoid preloading resources and classes eagerly.
+            // In such cases, we will preload things prior to our first fork.
+            if (!enableLazyPreload) {
+                bootTimingsTraceLog.traceBegin("ZygotePreload");
+                EventLog.writeEvent(LOG_BOOT_PROGRESS_PRELOAD_START,
+                    SystemClock.uptimeMillis());
+                preload(bootTimingsTraceLog);
+                EventLog.writeEvent(LOG_BOOT_PROGRESS_PRELOAD_END,
+                    SystemClock.uptimeMillis());
+                bootTimingsTraceLog.traceEnd(); // ZygotePreload
+            } else {
+                Zygote.resetNicePriority();
+            }
+
+            // Do an initial gc to clean up after startup
+            bootTimingsTraceLog.traceBegin("PostZygoteInitGC");
+            gcAndFinalize();
+            bootTimingsTraceLog.traceEnd(); // PostZygoteInitGC
+
+            bootTimingsTraceLog.traceEnd(); // ZygoteInit
+            // Disable tracing so that forked processes do not inherit stale tracing tags from
+            // Zygote.
+            Trace.setTracingEnabled(false, 0);
+
+            Zygote.nativeSecurityInit();
+
+            // Zygote process unmounts root storage spaces.
+            Zygote.nativeUnmountStorageOnInit();
+
+            ZygoteHooks.stopZygoteNoThreadCreation();
+
+            if (startSystemServer) {
+                Runnable r = forkSystemServer(abiList, socketName, zygoteServer);
+
+                // {@code r == null} in the parent (zygote) process, and {@code r != null} in the
+                // child (system_server) process.
+                if (r != null) {
+                    r.run();
+                    return;
+                }
+            }
+
+            Log.i(TAG, "Accepting command socket connections");
+
+            // The select loop returns early in the child process after a fork and
+            // loops forever in the zygote.
+            caller = zygoteServer.runSelectLoop(abiList);
+        } catch (Throwable ex) {
+            Log.e(TAG, "System zygote died with exception", ex);
+            throw ex;
+        } finally {
+            zygoteServer.closeServerSocket();
+        }
+
+        // We're in the child process and have exited the select loop. Proceed to execute the
+        // command.
+        if (caller != null) {
+            caller.run();
+        }
+    }
+
+    ZygoteConnection(LocalSocket socket, String abiList)
+
+    static void preload(TimingsTraceLog bootTimingsTraceLog) {
+        Log.d(TAG, "begin preload");
+        bootTimingsTraceLog.traceBegin("BeginIcuCachePinning");
+        beginIcuCachePinning();
+        bootTimingsTraceLog.traceEnd(); // BeginIcuCachePinning
+        bootTimingsTraceLog.traceBegin("PreloadClasses");
+        preloadClasses();
+        bootTimingsTraceLog.traceEnd(); // PreloadClasses
+        bootTimingsTraceLog.traceBegin("PreloadResources");
+        preloadResources();
+        bootTimingsTraceLog.traceEnd(); // PreloadResources
+        Trace.traceBegin(Trace.TRACE_TAG_DALVIK, "PreloadAppProcessHALs");
+        nativePreloadAppProcessHALs();
+        Trace.traceEnd(Trace.TRACE_TAG_DALVIK);
+        Trace.traceBegin(Trace.TRACE_TAG_DALVIK, "PreloadOpenGL");
+        preloadOpenGL();
+        Trace.traceEnd(Trace.TRACE_TAG_DALVIK);
+        preloadSharedLibraries();
+        preloadTextResources();
+        // Ask the WebViewFactory to do any initialization that must run in the zygote process,
+        // for memory sharing purposes.
+        WebViewFactory.prepareWebViewInZygote();
+        endIcuCachePinning();
+        warmUpJcaProviders();
+        Log.d(TAG, "end preload");
+
+        sPreloadComplete = true;
+    }
+
+    Runnable processOneCommand(ZygoteServer zygoteServer) {
+    private Runnable handleChildProc(Arguments parsedArgs, FileDescriptor[] descriptors, FileDescriptor pipeFd, boolean isZygote) {
+    private void handleParentProc(int pid, FileDescriptor[] descriptors, FileDescriptor pipeFd)
+com.android.internal.os.Zygote
+com.android.internal.os.ZygoteConnection
+
+
+com.android.internal.os.RuntimeInit
+    public static final void main(String[] argv) {
+        enableDdms();
+        if (argv.length == 2 && argv[1].equals("application")) {
+            if (DEBUG) Slog.d(TAG, "RuntimeInit: Starting application");
+            redirectLogStreams();
+        } else {
+            if (DEBUG) Slog.d(TAG, "RuntimeInit: Starting tool");
+        }
+
+        commonInit();
+
+        /*
+         * Now that we're running in interpreted code, call back into native code to run the system.
+         */
+        nativeFinishInit();
+
+        if (DEBUG) Slog.d(TAG, "Leaving RuntimeInit!");
+    }
+
+        protected static Runnable applicationInit(int targetSdkVersion, String[] argv,
+                ClassLoader classLoader) {
+            // If the application calls System.exit(), terminate the process
+            // immediately without running any shutdown hooks.  It is not possible to
+            // shutdown an Android application gracefully.  Among other things, the
+            // Android runtime shutdown hooks close the Binder driver, which can cause
+            // leftover running threads to crash before the process actually exits.
+            nativeSetExitWithoutCleanup(true);
+
+            // We want to be fairly aggressive about heap utilization, to avoid
+            // holding on to a lot of memory that isn't needed.
+            VMRuntime.getRuntime().setTargetHeapUtilization(0.75f);
+            VMRuntime.getRuntime().setTargetSdkVersion(targetSdkVersion);
+
+            final Arguments args = new Arguments(argv);
+
+            // The end of of the RuntimeInit event (see #zygoteInit).
+            Trace.traceEnd(Trace.TRACE_TAG_ACTIVITY_MANAGER);
+
+            // Remaining arguments are passed to the start class's static main
+            return findStaticMain(args.startClass, args.startArgs, classLoader);
+        }
+com.android.internal.os.Runtime
 
 
 
 
+android.security.keystore.AndroidKeyStoreProvider
 
 
 

@@ -2,20 +2,18 @@
 
 
 
-本章介绍 Android Build 系统的原理及运行机制.
-
-
-
-
 Android 的 Build 系统是基于 GNU Make 和 Shell 构建的一套编译环境.
 
-为了管理整套源码的编译, Android 专门开发了自己的 Build 系统, 这套系统定义了大量的变量和函数,
-无论编写一个产品的配置文件还是一个模块的 Android.mk 文件, 都不用直接和 GNU Make 打交道, 只
-需要理解 Android 提供的编译变量和函数, 就能够方便的将我们开发的模块加入到 Android 的 Build 体系中.
 
-Android 的 Build 系统除了完成对目标(手机)系统的二进制文件, APK 应用程序的编译, 链接, 打包等工作外,还需要生成
-目标文件系统的镜像以及各种配置文件, 同时还要维护各个模块间的依赖关系, 确保某个模块的修改能引起所依赖的文件重新编译
-Android Build 系统的功能非常强大, 能同时支持多架构(x86, arm, mips),多语言(汇编, c/c++, java)和多目标(同时支持多个目标产品).
+为了管理整套源码的编译, Android 专门开发了自己的 Build 系统, 这套系统定义了大量的变量和函数,
+无论编写一个产品的配置文件还是一个模块的 Android.mk 文件, 都不用直接和 GNU Make 打交道,
+只需要理解 Android 提供的编译变量和函数, 就能够方便的将我们自己开发的模块加入到 Android 的 Build 体系中.
+
+
+Android 的 Build 系统除了完成对目标(手机)系统的二进制文件, APK 应用程序的编译, 链接, 打包等工作外,还
+需要生成目标文件系统的镜像以及各种配置文件, 同时还要维护各个模块间的依赖关系, 确保某个模块的修改能引起所依赖的文件重新编译.
+Android Build 系统的功能非常强大, 能同时支持多架构(x86, arm, mips), 多语言(汇编, c/c++, java) 和 多目标(同时支持多个目标产品).
+
 
 从大的方面讲, Android 的 Build 系统可以分成三大块:
     第一块是位于 build/core 目录下的文件, 这是 Android Build 系统的框架和核心.
@@ -23,46 +21,367 @@ Android Build 系统的功能非常强大, 能同时支持多架构(x86, arm, mi
     第三块是各模块的编译文件 Android.mk, 位于模块的源文件目录下.
 
 
+本章将分析这 3 大块涉及的脚本文件, 让读者能完全理解 Android Build 系统的原理及运行机制.
+
+
+
 2.1 Android Build系统核心
-    Android Build 系统的核心位于目录 build/core, 这个目录中有几十个 mk 文件以及一些 shell脚本和 perl脚本, 它们构成了 Android Build 系统的基础和框架.
+    Android Build 系统的核心位于目录 build/core, 这个目录中有几十个 mk 文件以及一些 shell 脚本和 perl 脚本, 它们构成了 Android Build 系统的基础和框架.
+
+    mk 文件
+    perl 脚本
+    shell 脚本
+
 
     Android 系统的编译命令就是了解 Android Build 系统的入口.
         $ . build/envsetup.sh
         $ lunch
         $ make
+
     下面顺着这三条命令, 一步步分析整个编译过程.
 
 
-    2.1.1 编译环境的建立
-        envsetup.sh 文件的作用
-        lunch 命令的功能
 
-    2.1.2 Build相关的环境变量
-        执行完lunch命令后系统会打印出当前配置所生成的环境变量, 这些环境变量将影响编译过程.
+2.1.1 编译环境的建立
+
+    1. envsetup.sh 文件的作用
+        执行 Android 系统的编译, 必须先运行 envsetup.sh 脚本, 这个脚本会建立 Android 的编译环境.
+        打开 build/envsetup.sh 文件, 可以看到这个脚本中定义了很多 shell 命令, 这些 shell 命令在执行完 envsetup.sh 脚本后就可以从 shell 环境中调用了.
+
+        编译中执行的 lunch 命令就是在 envsetup.sh 脚本中定义的.
+
+        shell 命令如果没有被调用是不会执行的.
+
+        下面看看运行 envsetup.sh 脚本时实际执行的代码, 如下所示:
 
 
-    2.1.3 Build系统的层次关系
-    2.1.4 分析main.mk文件
-    2.1.5 Build系统的编译目标介绍
-    2.1.6 分析config.mk文件
-    2.1.7 分析product_config.mk文件
-    2.1.8 Android 5.0中的64位编译
+        Android 的编译命令
+            lunch   指定当前编译的产品
+            tapas   以交互方式设置 build 环境变量
+            croot   快速切换到源码的根目录, 方便开始编译
+            m       编译整个源码, 但是不用将当前目录切换到源码的根目录
+            mm      编译当前目录下的所有模块, 但是不编译它们的依赖模块
+            mmm     编译指定目录下的所有模块, 但是不编译它们的依赖模块
+            mma     编译当前目录下的所有模块, 同时编译它们的依赖模块
+            mmma    编译指定目录下的所有模块, 同时编译它们的依赖模块
+            cgrep   对系统所有的 C/C++ 文件执行 grep 命令
+            ggrep   对系统中所有本地的 Gradle 文件执行 grep 命令
+            jgrep   对系统所有 Java 文件执行 grep 命令
+            resgrep 对系统中所有 res 目录下的 XML 文件执行 grep 命令
+            sgrep   对系统中所有源文件执行 grep 命令
+            godir   根据 godir 后的参数文件名在整个源码目录中查找, 然后切换到该目录
+
+
+    2. lunch 命令的功能
+        lunch 命令如果没有参数, 系统会打印出产品列表供选择.
+        lunch 命令也可以有参数, 参数的格式是:
+            <product_name>-<build_variant>
+        product_name 必须是系统中已经定义的产品名称, build_variant 必须是 eng, user, userdebug 三者之一.
+
+        lunch 命令主要作用是根据用户输入或选择的产品名来设置与具体产品相关的环境变量.
+        这些环境变量与产品编译相关的主要是下面 3 项:
+            TARGET_PRODUCT          对应 product_name
+            TARGET_BUILD_VARIANT    对应 build_variant, 必须是 eng, user, userdebug三者之一
+            TARGET_BUILD_TYPE       一般是 release
+
+
+2.1.2 Build相关的环境变量
+    执行完lunch命令后系统会打印出当前配置所生成的环境变量, 这些环境变量将影响编译过程.
+    PLATFORM_VERSION_CODENAME
+    PLATFORM_VERSION
+    TARGET_PRODUCT
+    TARGET_BUILD_VARIANT
+    TARGET_BUILD_TYPE
+    TARGET_BUILD_APPS
+    TARGET_ARCH     表示编译目标的 CPU 架构
+    TARGET_ARCH_VARIANT     表示编译目标的 CPU 架构版本
+    TARGET_CPU_VARIANT      表示编译目标的 CPU 代号
+    TARGET_2ND_ARCH             表示编译目标的第二 CPU 架构
+    TARGET_2ND_ARCH_VARIANT     表示编译目标的第二 CPU 架构版本
+    TARGET_2ND_CPU_VARIANT      表示编译目标的第二 CPU 的代号
+    HOST_ARCH       表示编译平台的架构
+    HOST_OS         表示编译平台使用的操作系统
+    HOST_OS_EXTRA   表示编译平台使用的操作系统的一些额外信息, 包括内核版本号, 产品名称, 代号等
+    BUILD_ID        BUILD_ID的值会出现在编译的版本信息中, 可以利用这个环境变量来定义公司特有的标识
+    OUT_DIR         指定编译结果的输出目录
+
+    这些环境变量中, TARGET_2ND_ARCH, TARGET_2ND_ARCH_VARIANT, TARGET_2ND_CPU_VARIANT 是 Android 5.0 新增的,
+    当系统运行在 64 位编译环境时, 考虑到还要支持32 位的应用, 因此, 这里定义了两套 CPU 架构, 后面介绍 64 位编译时还会谈到这一点.
+
+    对这些环境变量的修改, 可以放到产品的定义文件中, 后面介绍产品定义文件时会讲解如何修改这些变量的值.
+    如果只是希望临时改变这些环境变量的值, 可以通过在 make 命令中加入参数的方式完成, 例如:
+        make BUILD_ID="Android L"
+        通过这条命令可以将环境变量 BUILD_ID 的值设置成 "Android L".
+
+    未完待续......
+
+
+
+2.1.3 Build系统的层次关系
+    编译产品的目的是生成用于 "刷机" 的各种 image 文件, 因此, 生成这些特殊格式的文件将是 Build 系统的主要功能.
+
+    产品配置文件的作用就是告诉 Build 系统 它需要用哪些模块来组成产品.
+
+    执行 make 命令会调用 build 目录下的 Makefile 文件, 它的内容如下:
+        include build/core/main.mk
+
+    Makefile 文件只有一行, 包含进 build/core/main.mk 文件.
+    build/core/main.mk 文件是 Android Build 系统的主控文件.
+
+    Makefile 文件看上去很庞大, 其实主要由 3 种内容构成: 变量定义, 函数定义 和 目标依赖规则.
+    mk 文件之间的包含关系很重要, 清楚了包含关系就能知道产品配置文件和模块编译文件是如何 "加入" 到 Build 过程中的.
+
+    Build 系统主要编译脚本简介
+        main.mk
+        help.mk
+        config.mk
+        product_config.mk
+        product.mk
+        definitions.mk  定义了大量 Build 系统中使用的函数, 如果熟悉这些函数, 编写产品配置文件将会更加得心应手.
+        未完待续......
+
+2.1.4 分析main.mk文件
+    build/core/main.mk 文件是 Android Build 系统的主控文件.
+    分段解释如下:
+        命令 make 相当于 "make droid"
+        注意 "-include" 和 "include" 的区别是: 前者包含的文件如果不存在不会报错, 后者则会报错并停止编译.
+
+
+2.1.5 Build 系统的编译目标介绍
+    Build 系统中的独立目标:
+        make clean          清除所有编译结果, 相当于执行 rm out -rf
+        make snod           重新生成最终的 image 文件, 但是不再重新编译模块
+        make help           打印 build 系统简单的帮助信息
+        make sdk            生成 Android SDK
+        make offline-sdk-docs
+        make doc-comment-check-docs
+        make libandroid_runtime     编译出所有 framework 的 JNI 库
+        make framework              编译出所有 framework 的 jar 包
+        make services               编译出系统服务及相关的模块
+
+
+2.1.6 分析config.mk文件
+
+2.1.7 分析product_config.mk文件
+
+2.1.8 Android 5.0 中的 64 位编译
+        Android 5.0 开始支持 64位编译, 但是目前市场上只有少数几款 64 位的移动 CPU, 因此, Android 5.0 系统既允许运行在 32 位 CPU 上, 也能运行在 64 位 CPU 上.
+
+        为了保持兼容性, 运行在 64 位 CPU 上时, 能同时支持运行 32位 和 64位 的应用, 理论上就会有 4 种运行模式:
+            纯 32 位模式                             适用于 32 位的CPU
+            缺省 32 位模式, 同时支持 64 位模式          需要 64 位的CPU, 能与现在已有的应用最大程度的兼容
+            缺省 64 位模式, 同时支持 32 位模式          需要 64 位的CPU, 能提供比较好的兼容性, 同时最大程度的利用了64位的优势
+            纯 64 位模式                              需要 64 位的 CPU, 这种模式下带有 32 位动态库的应用将无法使用
+        这 4 种模式从 Zygote 进程的启动就可以看出.
+        Android 5.0 一共定义了 4 中 Zygote 进程的启动方式, 对应这里介绍的 4 种模式, 具体内容请参见"8.2 Zygote 进程的初始化"一节的内容.
+
+
+        对于不带有动态库的 apk 应用, 不用关系系统是 32 位还是 64 位.
+        对于带有动态库的 apk 应用, 需要考虑将动态库编译成 32位 还是 64位.
+
+        只要执行 lunch 命令时选择的产品是 64 位, 那么编译一个动态库时就会同时生成 32 位版本和 64 位版本的文件,
+        其中 32 位版本放在了 out/.../system/lib 目录下, 64 位版本放在了 out/.../system/lib64 目录下.
+
+        Android 5.0 中 apk 优化后的 odex 文件存放的位置发生了变化.
+        Android 5.0 以前 apk 优化后的 odex 文件存放在 /data/dalvik-cache目录下.
+        Android 5.0 后这些文件存放在 apk 文件所在目录的 "arm" 和 "arm64" 目录下(如果是 x86 系统则存放在 x86 和 x86_64目录).
+
+
+
 2.2 Android的产品配置文件
-    2.2.1 分析hammerhead的配置
-    文件
-    2.2.2 编译类型eng、user和userdebug
-    2.2.3 产品的Image文件
-    2.2.4 如何加快编译速度
-    2.2.5 如何编译Android的模拟器
+
+2.2.1 分析 hammerhead 的配置文件
+    1. envsetup.sh
+    2. AndroidProduct.mk
+    3. BoardConfig.mk
+
+        BoardConfig.mk 文件主要定义了和设备硬件相关的参数, 包括 CPU, WIFI, GPS等
+
+
+2.2.2 编译类型 eng、user 和 userdebug
+    3 种编译类型的区别:
+        eng
+        user
+        userdebug
+
+
+2.2.3 产品的Image文件
+
+    1. boot.img
+        boot.img 是一种 Android 自定义的文件格式.
+        该格式包括了一个 2*1024 大小的文件头,
+        文件头后面是用 gzip 压缩过的 kernel 映像,
+        再后面是一个 ramdisk 映像,
+        最后是一个载入器程序,这个载入器是可选的, 某些映像文件中没有这部分.
+
+        各部分如下所示:
+            boot header     1 page
+            kernel          n pages
+            ramdisk         m pages
+            second stage    o pages
+        这里面各部分大小是 page 的整数倍, 这个 page 值在 BoardConfig.mk 中通过编译变量 BOARD_KERNEL_PAGESIZE 定义, 通常是 2048.
+        ramdisk 映像是一个小型文件系统, 它包括了初始化 Linux 系统所需要的全部核心文件.
+
+        下面是 ramdisk.img 中包含的文件和目录, 待补充....
+
+    2. recovery.img
+        recovery.img 相当于一个小型文本界面的 Linux 系统, 它有自己的内核和文件系统.
+        recovery.img 的作用是恢复或升级系统, 因此, 在 sbin 目录下会有一个 recovery 程序.
+        recovery.img 中也包括了 adbd 和 系统配置文件 init.rc, 但是这些文件和 boot.img 中的不相同.
+
+        下面是 recovery.img 中包含的文件和目录, 待补充....
+
+    3. system.img
+        system.img 就是设备中 system 目录的镜像, 里面包含了 Android 系统主要的目录和文件.
+
+        下面是 system.img 中包含的文件和目录:
+            app         存放系统应用 apk 文件
+            bin         存放一些 Linux 的工具, 但是大部分都是 toolbox 的链接
+            etc         存放系统的配置文件
+            fonts       存放系统的字体文件
+            framework   存放系统平台所有 jar 包和资源文件包
+            lib         存放系统的共享库
+            media       存放系统的多媒体资源, 主要是铃声
+            priv-app    存放系统的核心 apk 文件
+            tts         存放系统的语音合成文件
+            usr         存放各种键盘布局, 时间区域文件
+            vendor      存放第三方厂商的配置文件, firmware 文件以及动态库
+            xbin        存放系统的管理工具, 这个文件夹的作用相当于标准 Linux 文件系统中的 sbin
+            build.prop  系统属性的定义文件
+
+    3. userdata.img
+        userdata.img 是设备中 data 目录的镜像, 初始时一般不包含任何文件.
+        Android 系统初始化时会在 /data 目录下创建一些子目录和文件.
+
+
+2.2.4 如何加快编译速度
+    影响 Android 编译最大的因素是 CPU 和 内存.
+    同一型号的 CPU 在编译时指定的线程数量越多, 对内存的需求也越大.
+    如果内存不够, 系统会使用磁盘来虚拟内存, 当这种情况发生, 编译时间会大大加长.
+
+    可以使用 Linux 的资源管理器查看编译时的内存使用情况, 看看是否因为内存不足导致编译时间过长.
+
+    CPU 和 内存毕竟不能无限提高, 如果还想提高编译速度, Google 推荐使用 CCCache 来加快编译速度.
+    CCCache 的使用方法如下:
+        export USE_CCACHE = 1
+        export CCACHE_DIR = /<path_of_your_choice>/.ccache
+        prebuilts/misc/linux-x86/ccache/ccache -M 50G
+    注:
+        需要注意的是 CCCache并不能提高第一次编译的速度.
+        它的原理是将一些系统库的编译结果保存起来, 下次编译时如果检测到这些库没有变化, 就直接使用 cache 中保存的文件.
+
+
+2.2.5 如何编译Android的模拟器
+    下面介绍模拟器的编译方式:
+        . build/envsetup.sh
+        lunch sdk-eng
+        make
+    编译成功后, 启动模拟器的命令:
+        emulator
+
+
+
 2.3 编译Android的模块
-    2.3.1 模块编译变量简介
-    2.3.2 常用模块定义实例
-    2.3.3 预编译模块的目标定义
-    2.3.4 常用“LOCAL_”变量
+
+2.3.1 模块编译变量简介
+    模块编译变量讲解, 非常有用, 未完待续...
+
+2.3.2 常用模块定义实例
+    1. 编译一个 apk 文件
+    2. 编译一个 Java 共享库
+    3. 编译一个 Java 静态库
+    4. 编译一个 Java 资源包文件
+    5. 编译一个可执行文件
+    6. 编译一个 native 的共享库
+    7. 编译一个 native 的静态库
+
+2.3.3 预编译模块的目标定义
+
+2.3.4 常用 "LOCAL_" 变量
+    编写模块的编译文件, 实际就是定义一系列以 "LOCAL_" 开头的编译变量.
+    mk 文件中使用的编译变量说明:
+        LOCAL_ASSET_FILES
+        LOCAL_CC
+        LOCAL_CXX
+        LOCAL_PREBUILT_JAVA_LIBRARIES
+        LOCAL_PACKAGE_NAME
+        LOCAL_SRC_FILES     指定源文件列表
+
+
+
 2.4 Android中的签名
-    2.4.1 Android应用签名方法
+    在 Android 系统中, 所有安装到系统中的 APK 应用都需要签名, 所谓签名就是给应用附加一个数字证书, 这个数字证书的作用是表明该应用的确由某人或某公司制作.
+
+    虽然数字证书有很多的用途, 但是在 Android 中, 它唯一的作用就是表明制作者的身份.
+
+    和传统的数字证书不同, Android 的数字证书比较简单, 不需要权威的认证机构来颁发和管理证书, 主要是基于自我认证的方式.
+
+    下面介绍对 Android 应用进行签名的方法.
+
+2.4.1 Android应用签名方法
+    首先, 创建用于签名的证书文件.
+    Android 使用 Java 工具 keytool 生成数字证书并签名, 生成数字证书的命令是:
+        keytool -genkey -v -keystore tom.keystore -alias tom_key -keyalg RSA -validaity 1000
+        -keystore tom.keystore  表示证书的文件名
+        -alias tom_key          表示证书的别名是 tom_key
+        -keyalg RSA             表示采用的加密算法是 RSA
+        -validaity 1000         表示证书的有效期是 1000 天
+
     2.4.2 Android系统签名介绍
-    2.4.3 Android签名漏洞分析 
+        Android 系统签名的方法和应用签名不太一样. 在 build/product/security 目录下存放着 4 组后缀名为 .x509.pem 和 .pk8 的文件,
+        分别代表 testkey, platform, shared, media 4种默认的系统签名. 这4组文件是 Android 预先建好的, 用来给 4 种不同的文件签名:
+            testkey  用于普通 APK
+            platform 用于系统核心的 APK
+            shared   用于 Launch, Contacts 等重要 APK
+            media    用于系统的多媒体和下载类 APK
+
+        如果要发布产品, 就需要生成公司自己的签名文件, 具体的方法是:
+            1) cd development/tools
+            2) make_key testkey '/C=CN/ST=BJ/L=BJ/O=Google/OU=Android/CN=tom/emailAddress=tom@q.com'
+            3) 输入密码
+            4) 生成私钥 testkey.pk8 和 公钥 testkey.x509.pem (*.pk8 是私钥, *.x509.pem是公钥)
+
+        生成其他3组签名文件的方法类似, 只是传入的第一个参数不一样:
+            make_key platform '/C=CN/ST=BJ/L=BJ/O=Google/OU=Android/CN=tom/emailAddress=tom@q.com'
+            make_key shared '/C=CN/ST=BJ/L=BJ/O=Google/OU=Android/CN=tom/emailAddress=tom@q.com'
+            make_key media '/C=CN/ST=BJ/L=BJ/O=Google/OU=Android/CN=tom/emailAddress=tom@q.com'
+
+        device.mk 中添加编译变量 PRODUCT_DEFAULT_DEV_CERTIFICATE 的定义, 它的值是新建 security 目录的路径:
+            PRODUCT_DEFAULT_DEV_CERTIFICATE := /device/lge/hammerhead/security
+
+        利用 Build 系统进行编译时签名是自动完成的, 无须单独执行. 这里需要注意的是, build 中的签名是用 signapk.jar 来完成的. 同样也可以用 signapk.jar 来给应用签名, 例如:
+            java -jar signapk.jar platform.x509.pem platform.pk8 test.apk test_signed.apk
+
+
+
+    2.4.3 Android签名漏洞分析
+        第一个漏洞, 出问题的代码位于 libcore/luni/src/main/java/java/util/zip/ZipFile.java 中.
+        下面看看这段从版本 Android 4.2.2 中摘录的代码:
+            private void readCentralDir() throws IOException {
+                ......
+            }
+        注:
+            最后这段 for 循环的代码有问题, 循环中读取了压缩包的内容并逐项加入到 mEntries 中,
+            而 mEntries 是一个类型为 LinkedHashMap 的变量, 调用 put() 函数时如果有重名项, 会覆盖前一项.
+
+
+        下面看看 Android 5.0 版本中摘录的代码, 就知道 Google 如何修复这个漏洞了:
+            private void readCentralDir() throws IOException {
+                ......
+            }
+        注:
+            新的代码会先检查 entries 中是否已经存在同名的项, 如果有就会抛出异常.
+            这个漏洞在 Android 4.3 中就已经修正了.
+
+        可能有人会感兴趣, 如何制造一个这样的 APK 文件呢? 其实很简单, 这里就不介绍了.
+        当然检测这种恶意程序也很简单, 只要发现一个 apk 中有两个 classes.dex 就可以判定, 正常的 apk 文件不会包含两个 classes.dex 文件.
+
+
+        第二个Android签名漏洞, 利用了在 Android 签名验证过程中, 对 Zip 文件进行 16 位数的读取时, 没有考虑到大于2的15次幂的情况,
+        这样在将 short 型表示的块大小转换成 int 型时, 会把大于2的15次幂的数转换成 int 型的负数, 但是在 native 层执行时并不会出错.
+        因为 Java 的 int,short,long都是有符号数, 而不像 C/C++ 中还有无符号数.
+
+        具体的漏洞原理就不分析了, 有兴趣的读者可以上网搜索.
 
 
 

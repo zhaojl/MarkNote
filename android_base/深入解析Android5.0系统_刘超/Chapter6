@@ -1,32 +1,792 @@
 第6章 Android 的同步和消息机制
 
 
-6.1 原子操作
-6.1.1 Android的原子操作函数
-6.1.2 原子操作的实现原理
-6.1.3 内存屏障和编译屏障
-6.2 Android native层的同步方法
-6.2.1 互斥体Mutex和自动锁
-Autolock
-6.2.2 解决线程同步——条件
-类Condition
-6.3 Android Java层的同步机制
-6.3.1 同步关键字synchronized
-6.3.2 Object类在同步中
-的作用
-6.4 Android的消息机制
-6.4.1 消息模型
-6.4.2 理解Looper类
-6.4.3 理解Handler类
-6.4.4 消息的同步——Message
-类的setAsynchronous()
-方法
-6.4.5 分析MessageQueue类
-6.5 进程间的消息传递
-6.5.1 理解Messenger类
-6.5.2 建立通信通道——
-AsyncChannel类的作用 
-=======
-第六章 连接Java和C/C++层的关键－Android的JNI
 
->>>>>>> 2f289295a7bee3b9a989b1c4b9e7fe0cf492964d
+前面介绍了, Android 程序运行时会根据需要自动产生 Binder 线程, 因此, 即使上层应用代码不创造任何线程, Android 应用进程中还是会有多个线程在运行.
+包含有多个运行线程的程序会不可避免地遇到资源竞争的问题, 这里谈到的资源可能是一个全局变量, 也可能是系统的硬件资源, 如扬声器等.
+Linux 下线程的运行模式是抢占式, 因此, 程序可能会在任何时刻失去对 CPU 的占用.
+为了防止使用全局资源时因为线程的切换出现错误, 通常需要使用系统提供的同步机制来 "独占" 全局资源的访问权.
+
+虽然同步机制能解决资源访问的冲突问题, 但是也不可避免的带来了性能上的损失. 因此在不影响正确性的前提下, 应当尽量避免使用同步机制.
+
+
+
+6.1 原子操作
+    对简单类型的全局变量进行操作时, 即使是一些简单的操作, 如加法和减法, 在汇编级别上也需要多条指令才能完成.
+    整个操作的完成需要先读取内存中的值, 在 CPU 中计算, 然后再写回内存中.
+    如果这中间发生了线程切换并改变了内存中的值, 这样最后执行的结果就会发生错误.
+    避免这种问题发生的最好办法就是使用原子操作.
+
+    原子操作中没有使用锁, 从效率上看要比使用锁来保护全局变量划算.
+    但是原子操作也不是没有一点性能上的代价, 还是要尽量避免使用.
+
+    Android 中用汇编语言实现了一套原子操作函数, 这些函数在同步机制的实现中被广泛使用.
+
+
+6.1.1 Android 的原子操作函数
+    什么是原子操作? 所谓原子操作, 就是该操作绝不会在执行完毕前被任何其他任务或事件打断, 也就说, 原子操作是最小的执行单位.
+    从内存中取数据到寄存器 --> 对寄存器中的数据进行递增操作,结果还在寄存器中 --> 寄存器的结果写回内存
+
+    /system/core/libcutils/include/cutils/atomic.h
+    /system/core/include/cutils/atomic.h
+
+    下面看 Android 中定义的原子操作函数, 代码路径:
+        1. 原子变量的加法操作
+            int32_t android_atomic_add(int32_t value, volatile int32_t* addr)
+        注:
+            原子变量的减法操作可以通过传递负值给加法操作函数来完成.
+
+        2. 原子变量的自增和自减操作
+            int32_t android_atomic_inc(volatile int32_t* addr) 原子加1/自增
+            int32_t android_atomic_dec(volatile int32_t* addr) 原子减1/自减
+
+        3. 原子变量的与操作
+            int32_t android_atomic_and(int32_t value, volatile int32_t* addr) 原子与
+
+        4. 原子变量的或操作
+            int32_t android_atomic_or(int32_t value, volatile int32_t* addr) 原子或
+
+        5. 原子变量的设置
+            void android_atomic_acquire_store(int32_t value, volatile int32_t* addr) 原子赋值
+            void android_atomic_release_store(int32_t value, volatile int32_t* addr) 原子赋值
+
+        6. 原子变量的读取
+            int32_t android_atomic_acquire_load(volatile const int32_t* addr) 原子读取
+            int32_t android_atomic_release_load(volatile const int32_t* addr) 原子读取
+        注意:
+            上面这两个函数从功能上看是一样的，区别只是内存屏障位于读取前还是读取后.
+            下面这两组函数也类似.
+
+        7. 原子变量的比较并交换
+            int android_atomic_acquire_cas(int32_t oldvalue, int32_t newvalue, volatile int32_t* addr) 原子比较并交换
+            int android_atomic_release_cas(int32_t oldvalue, int32_t newvalue, volatile int32_t* addr) 原子比较并交换
+
+        8. 还有两个原子变量的宏定义
+            /* #define a b 写代码时用a代替b, Aliases for code using an older version of this header */
+            #define android_atomic_write android_atomic_release_store
+            #define android_atomic_cmpxchg android_atomic_release_cas
+
+        9. 添加内存屏障函数
+            void android_compiler_barrier(void)
+            void android_memory_barrier(void)
+
+        下面是这两个内存屏障函数的代码:
+            // Fence primitives.
+            ANDROID_ATOMIC_INLINE
+            void android_compiler_barrier(void) {
+                __asm__ __volatile__ ("" : : : "memory");
+            }
+
+            ANDROID_ATOMIC_INLINE
+            void android_memory_barrier(void) {
+                atomic_thread_fence(memory_order_seq_cst);
+            }
+
+
+6.1.2 原子操作的实现原理
+    Android 原子操作的实现方式和 CPU 的架构有密切关系, 现在的原子操作一般都是在 CPU 指令级别实现的.
+    这种实现方式不但简单, 而且效率非常高.
+
+    虽然原子操作的接口函数有 10 个, 但是只有 android_atomic_add() 和 android_atomic_cas() 两个函数通过汇编代码真正实现了原子操作,
+    其他函数都只是在内部调用它们而已, 这两个函数的原理差不多.
+
+    ARM 平台上的实现更复杂一点, 下面以 ARM 平台的加法函数为例来分析原子变量的实现原理:
+    代码路径 /device/google/contexthub/firmware/os/cpu/cortexm4/atomic.c
+
+        uint32_t atomicAddByte(volatile uint8_t *byte, uint32_t addend) {
+            uint32_t prevVal, storeFailed, tmp;
+
+            do {
+                asm volatile(
+                    "ldrexb %0,     [%4] \n"
+                    "add    %2, %0, %3   \n"
+                    "strexb %1, %2, [%4] \n"
+                    :"=r"(prevVal), "=r"(storeFailed), "=r"(tmp), "=r"(addend), "=r"(byte)
+                    :"3"(addend), "4"(byte)
+                    :"memory"
+                );
+            } while (storeFailed);
+
+            return prevVal;
+        }
+
+        uint32_t atomicAdd32bits(volatile uint32_t *word, uint32_t addend) {
+            uint32_t prevVal, storeFailed, tmp;
+
+            do {
+                asm volatile(
+                    "ldrex  %0,     [%4] \n"
+                    "add    %2, %0, %3   \n"
+                    "strex  %1, %2, [%4] \n"
+                    :"=r"(prevVal), "=r"(storeFailed), "=r"(tmp), "=r"(addend), "=r"(word)
+                    :"3"(addend), "4"(word)
+                    :"memory"
+                );
+            } while (storeFailed);
+
+            return prevVal;
+        }
+
+        uint32_t atomicXchgByte(volatile uint8_t *byte, uint32_t newVal) {
+            uint32_t prevVal, storeFailed;
+
+            do {
+                asm volatile(
+                    "ldrexb %0,     [%3] \n"
+                    "strexb %1, %2, [%3] \n"
+                    :"=r"(prevVal), "=r"(storeFailed), "=r"(newVal), "=r"(byte)
+                    :"2"(newVal), "3"(byte)
+                    :"memory"
+                );
+            } while (storeFailed);
+
+            return prevVal;
+        }
+
+        uint32_t atomicXchg32bits(volatile uint32_t *word, uint32_t newVal) {
+            uint32_t prevVal, storeFailed;
+
+            do {
+                asm volatile(
+                    "ldrex %0,     [%3] \n"
+                    "strex %1, %2, [%3] \n"
+                    :"=r"(prevVal), "=r"(storeFailed), "=r"(newVal), "=r"(word)
+                    :"2"(newVal), "3"(word)
+                    :"memory"
+                );
+            } while (storeFailed);
+
+            return prevVal;
+        }
+
+        bool atomicCmpXchgByte(volatile uint8_t *byte, uint32_t prevVal, uint32_t newVal) {
+            uint32_t currVal, storeFailed;
+
+            do {
+                asm volatile(
+                    "ldrexb %0,     [%1] \n"
+                    :"=r"(currVal), "=r"(byte)
+                    :"1"(byte)
+                    :"memory"
+                );
+
+                if (currVal != prevVal)
+                    return false;
+
+                asm volatile(
+                    "strexb %0, %1, [%2] \n"
+                    :"=r"(storeFailed), "=r"(newVal), "=r"(byte)
+                    :"1"(newVal), "2"(byte)
+                    :"memory"
+                );
+            } while (storeFailed);
+
+            return true;
+        }
+
+        bool atomicCmpXchg32bits(volatile uint32_t *word, uint32_t prevVal, uint32_t newVal) {
+            uint32_t currVal, storeFailed;
+
+            do {
+                asm volatile(
+                    "ldrex %0,     [%1] \n"
+                    :"=r"(currVal), "=r"(word)
+                    :"1"(word)
+                    :"memory"
+                );
+
+                if (currVal != prevVal)
+                    return false;
+
+                asm volatile(
+                    "strex %0, %1, [%2] \n"
+                    :"=r"(storeFailed), "=r"(newVal), "=r"(word)
+                    :"1"(newVal), "2"(word)
+                    :"memory"
+                );
+            } while (storeFailed);
+
+            return true;
+        }
+    注:
+        :"memory" 表示这里需要内存屏障.
+
+    下面看"内嵌汇编"的伪代码表示如下:
+        do {
+            asm volatile(
+                ldrex  prev, [ptr]
+                add  tmp, prev, increment
+                strex  status, tmp, [ptr]
+            );
+        } while (status != 0);
+    注:
+        1) ldrex 和 strex 是 ARMV6 新引入的同步指令.
+
+        2) ldrex 指令的作用是将指针 ptr 指向的内容放到 prev 变量中, 同时给执行处理器做一个标记(tag), 标记上指针 ptr 的地址, 表示这个内存地址已经有一个 CPU 正在访问.
+        当执行到 strex 指令时, 它会检查是否存在 ptr 的地址标记, 如果标记存在, strex 指令会把 add 指令执行的结果写入指针 ptr 指向的地址, 并返回0, 然后清除该标记.
+        返回的加过0 将保存在 status 变量中, 这样循环结束, 函数返回结果.
+
+        3) 如果在 strex 指令执行前发生了线程的上下文切换, 在切换回来后, ldrex 指令设置的标志将会被清除.
+        这时再执行 strex 指令时, 由于没有了这个标志, strex 指令将不会完成对 ptr 指针的存储操作, 而且 status 变量中的返回结果将是1, 因此, 循环将重新开始执行, 直到成功为止.
+
+    注意:
+        原子操作并没有禁止中断的发生或上下文切换, 而是让它们不影响操作的结果.
+
+
+
+6.1.3 内存屏障和编译屏障
+    现代 CPU 中指令的执行次序不一定按顺序执行, 没有相关性的指令可以打乱次序执行, 以充分利用 CPU 的指令流水线, 提高执行速度.
+
+    同时编译器也会对指令进行优化, 例如调整指令顺序来利用 CPU 的指令流水线.
+    这些优化方式, 大部分时间都工作良好, 但是在一些比较复杂的情况可能会出现错误,
+    例如, 执行同步代码时就有可能因为优化导致同步原语之后的指令在同步原语前执行.
+
+    内存屏障和编译屏障就是用来告诉 CPU 和编译器停止优化的手段.
+    编译屏障是指使用伪指令 "memory" 告诉编译器不能把 "memory" 执行前后的代码混淆在一起, 这时 "memory" 起到了一种优化屏障的作用.
+    内存屏障是在代码中使用一些特殊指令, 如 ARM 中的 dmb, dsb 和 isb 指令, x86 中的 sfence, lfence 和 mfence 指令.
+    CPU 遇到这些特殊指令后, 要等待前面的指令执行完成才能执行后面的指令.
+
+    这些指令的作用就好像一道屏障把前后指令隔开了, 防止 CPU 把前后两段指令颠倒执行.
+    (1) ARM 平台的内存屏障指令
+        dsb: 数据同步屏障指令, 它的作用是等待 所有前面的指令 执行完成后再执行后面的指令.
+        dmb: 数据内存屏障指令, 它的作用是等待 前面访问内存的指令 执行完成后再执行后面访问内存的指令.
+        isb: 指令同步屏障, 它的作用是等待 流水线中所有指令 执行完成后再执行后面的指令.
+
+    (2) x86 平台上的内存屏障指令
+        sfence: 存储屏障指令, 它的作用是等待 前面写内存的指令 执行完成后再执行后面写内存的指令.
+        lfence: 读取屏障指令, 它的作用是等待 前面读取内存的指令 执行完成后再执行后面读取内存的指令.
+        mfence: 混合屏障指令, 它的作用是等待 前面读写内存的指令 执行完成后再执行后面读写内存的指令.
+    要精确理解这些指令的含义, 需要去查阅处理器的说明, 这里只是对它们做了一点简单的介绍.
+
+    下面看看 Android 是如何利用这些指令来实现内存屏障和编译屏障的.
+    1. ARM 平台的函数代码
+        (1) 编译屏障:
+            void android_compiler_barrier(void)
+            注:
+                编译屏障的实现只是使用了伪指令 memory.
+
+        (2) 内存屏障:
+            void android_memory_barrier(void)
+            void android_memory_store_barrier(void)
+
+        下面是这两个内存屏障函数的代码:
+            // Fence primitives.
+            ANDROID_ATOMIC_INLINE
+            void android_compiler_barrier(void) {
+                __asm__ __volatile__ ("" : : : "memory");
+            }
+
+            ANDROID_ATOMIC_INLINE
+            void android_memory_barrier(void) {
+                atomic_thread_fence(memory_order_seq_cst);
+            }
+            void atomic_thread_fence(memory_order order) {
+              __c11_atomic_thread_fence(order);
+            }
+            #define atomic_thread_fence(order) __c11_atomic_thread_fence(order)
+            #define atomic_signal_fence(order) __c11_atomic_signal_fence(order)
+        注:
+            "dmb st": dmb 指令使用选项 st, 它表示要等待前面所有存储内存的指令执行完成后再执行后面的存储内存的指令.
+
+
+
+6.2 Android native层的同步方法
+    Android 在 Linux 提供的线程同步函数基础上进行二次封装, 让实现线程同步更加简单方便.
+    这些同步类和函数在 native 层的代码中出现的非常频繁.
+
+6.2.1 互斥体 Mutex 和自动锁 Autolock
+    Mutex 和 Autolock 是 Android native 层最常见的一种临界区保护手段, Autolock 只是提供了一种更简单的使用 Mutex 的方法.
+
+    /system/core/include/utils/Mutex.h
+    /system/core/libutils/include/utils/Mutex.h
+
+    Mutex 是一个 C++ 的类, 它的接口函数如下所示:
+        namespace android {
+        class Condition;
+        class CAPABILITY("mutex") Mutex {
+          public:
+            enum {
+                PRIVATE = 0,
+                SHARED = 1
+            };
+
+            Mutex();
+            explicit Mutex(const char* name);
+            explicit Mutex(int type, const char* name = NULL);
+            ~Mutex();
+
+            status_t lock() ACQUIRE();  // lock or unlock the mutex
+            void unlock() RELEASE();
+            status_t tryLock() TRY_ACQUIRE(true); // lock if possible; returns 0 on success, error otherwise
+
+            // Lock the mutex, but don't wait longer than timeoutNs (relative time). Returns 0 on success, TIMED_OUT for failure due to timeout expiration.
+            status_t timedLock(nsecs_t timeoutNs) TRY_ACQUIRE(true);
+
+            // Manages the mutex automatically. It'll be locked when Autolock is constructed and released when Autolock goes out of scope.
+            class SCOPED_CAPABILITY Autolock {
+              public:
+                inline explicit Autolock(Mutex& mutex) ACQUIRE(mutex) : mLock(mutex) { mLock.lock(); }
+                inline explicit Autolock(Mutex* mutex) ACQUIRE(mutex) : mLock(*mutex) { mLock.lock(); }
+                inline ~Autolock() RELEASE() { mLock.unlock(); }
+
+              private:
+                Mutex& mLock;
+                Autolock(const Autolock&);
+                Autolock& operator=(const Autolock&);
+            };
+
+              private:
+                friend class Condition;
+
+                Mutex(const Mutex&);
+                Mutex& operator=(const Mutex&);
+
+                #if !defined(_WIN32)
+                    pthread_mutex_t mMutex;
+                #else
+                    void _init();
+                    void* mState;
+                #endif
+        };
+        注:
+
+
+    下面是使用 Mutex 来保护全局变量的一个简单例子:
+        Mutex g_mutex;
+        int g_count = 0;
+        void ThreadFuncA() {
+            g_mutex.lock();
+            g_count++;
+            g_mutex.unlock();
+        }
+        void ThreadFuncB() {
+            g_mutex.lock();
+            g_count--;
+            if(g_count >= 0) {
+                ......
+            }
+            g_mutex.unlock();
+        }
+    注意:
+        使用 Mutex 注意不要忘记调用 unlock(), 否则可能会造成死锁.
+        如果一段受保护的代码有好几个出口, 每处都调用 unlock() 会让代码看上去不简洁, 也很容易因为遗忘造成错误.
+        因此 Android 封装了一个 Autolock 类, 使用时只需要在保护代码前构造一个 Autolock 的局部变量就可以了.
+
+    下面看 Autolock 的实现代码, Autolock 类是在 Mutex 类里面定义的:
+        class SCOPED_CAPABILITY Autolock {
+          public:
+            inline explicit Autolock(Mutex& mutex) ACQUIRE(mutex) : mLock(mutex) { mLock.lock(); }
+            inline explicit Autolock(Mutex* mutex) ACQUIRE(mutex) : mLock(*mutex) { mLock.lock(); }
+            inline ~Autolock() RELEASE() { mLock.unlock(); }
+
+          private:
+            Mutex& mLock;
+            Autolock(const Autolock&);
+            Autolock& operator=(const Autolock&);
+        };
+    注:
+        Autolock 的原理很简单, 就是在构造函数中加锁, 在析构函数中解锁, 因此, Android 的 Autolock 经常用在函数中来保护整个函数体.
+        但是 Autolock 使用不当也容易造成死锁.
+
+
+    下面看一个简单的例子:
+        Mutex g_lock;
+
+        void FooA() {
+            Autolock(g_lock);
+            ......
+        }
+
+        void FooB() {
+            Autolock(g_lock);
+            ......
+            FooA()
+        }
+    注意:
+        上面的例子函数 FooA() 和 FooB() 都使用了 Autolock(g_lock) 来进行保护, 而且 FooB() 函数调用了 FooA().
+        当调用 FooB() 函数时, 就会发生死锁. 当然实际情况会更复杂, 可能不是直接调用, 中间会经过另外一些函数中转, 这样就更不容易发现问题了.
+        因此, 不管是用 Mutex 还是 Autolock 都要十分小心.
+
+
+    下面看看 Mutex 类是如何实现的:
+        inline Mutex::Mutex() {
+            pthread_mutex_init(&mMutex, NULL);
+        }
+        inline Mutex::Mutex(__attribute__((unused)) const char* name) {
+            pthread_mutex_init(&mMutex, NULL);
+        }
+        inline Mutex::Mutex(int type, __attribute__((unused)) const char* name) {
+            if (type == SHARED) {
+                pthread_mutexattr_t attr;
+                pthread_mutexattr_init(&attr);
+                pthread_mutexattr_setpshared(&attr, PTHREAD_PROCESS_SHARED);
+                pthread_mutex_init(&mMutex, &attr);
+                pthread_mutexattr_destroy(&attr);
+            } else {
+                pthread_mutex_init(&mMutex, NULL);
+            }
+        }
+        inline Mutex::~Mutex() {
+            pthread_mutex_destroy(&mMutex);
+        }
+        inline status_t Mutex::lock() {
+            return -pthread_mutex_lock(&mMutex);
+        }
+        inline void Mutex::unlock() {
+            pthread_mutex_unlock(&mMutex);
+        }
+        inline status_t Mutex::tryLock() {
+            return -pthread_mutex_trylock(&mMutex);
+        }
+        inline status_t Mutex::timedLock(nsecs_t timeoutNs) {
+            timeoutNs += systemTime(SYSTEM_TIME_REALTIME);
+            const struct timespec ts = {
+                /* .tv_sec = */ static_cast<time_t>(timeoutNs / 1000000000),
+                /* .tv_nsec = */ static_cast<long>(timeoutNs % 1000000000),
+            };
+            return -pthread_mutex_timedlock(&mMutex, &ts);
+        }
+    注:
+        从上面的代码不难看出, Mutex 类的实现只是对 Linux 的 "pthread_mutex_***" 系列函数进行了简单的封装而已.
+        Linux 的线程系列函数已经很完善了, 没有太多需要补充的地方, 只是使用稍微繁琐一点.
+
+
+
+6.2.2 解决线程同步 —— 条件类 Condition
+    条件类 Condition 用来解决类似 "生产者-消费者" 类型的线程同步问题.
+
+    "生产者" 生产产品前先使用 Mutex 上锁, "消费者" 则等待, "生产者" 结束后, 唤醒 "消费者" 消费产品, 这类问题在多线程编程中很常见.
+
+    /system/core/include/utils/Condition.h
+    /system/core/libutils/include/utils/Condition.h
+
+    条件类 Condition 的接口定义如下:
+        namespace android {
+        class Condition {
+        public:
+            enum {
+                PRIVATE = 0,
+                SHARED = 1
+            };
+
+            enum WakeUpType {
+                WAKE_UP_ONE = 0,
+                WAKE_UP_ALL = 1
+            };
+
+            Condition();
+            explicit Condition(int type);
+            ~Condition();
+            // Wait on the condition variable.  Lock the mutex before calling. Note that spurious wake-ups may happen.
+            status_t wait(Mutex& mutex);
+            // same with relative timeout
+            status_t waitRelative(Mutex& mutex, nsecs_t reltime);
+            // Signal the condition variable, allowing one thread to continue.
+            void signal();
+            // Signal the condition variable, allowing one or all threads to continue.
+            void signal(WakeUpType type) {
+                if (type == WAKE_UP_ONE) {
+                    signal();
+                } else {
+                    broadcast();
+                }
+            }
+            // Signal the condition variable, allowing all threads to continue.
+            void broadcast();
+
+            private:
+            #if !defined(_WIN32)
+                pthread_cond_t mCond;
+            #else
+                void*   mState;
+            #endif
+        };
+    注:
+        条件类需要配合 Mutex 来使用.
+        Condition 的构造函数和 Mutex 类似, 也可以使用参数"SHARED", 这种情况主要用于进程间线程的同步.
+
+        Condition 的 wait 函数有 2 个:
+            wait(Mutex& mutex)
+            waitRelative(Mutex& mutex, nsecs_t reltime)
+        不带时间参数的函数表示无限等待.
+        带有时间参数的函数, 等待时间超时函数就会返回, 不会一直等待.
+        如果 wait 等待的 mutex 的锁释放了, 所有在该 mutex 上等待的 wait 都将返回.
+        在 mutex 解锁前, 还有一种方法来终止等待, 那就是调用 signal() 函数.
+
+        Condition 的 signal 函数也有 2 个:
+            signal()
+            signal(WakeUpType type) WAKE_UP_ONE WAKE_UP_ALL
+        不带参数的 signal() 调用只会唤醒一个等待的线程.
+        带参数的 signal() 函数可以通过入参 WAKE_UP_ONE 只唤醒一个等待的线程, 也可以通过入参 WAKE_UP_ALL 唤醒所有等待的线程.
+
+        Condition 的 broadcast() 函数用来唤醒所有等待的线程.
+
+
+    下面是 Condition 类的实现代码:
+        inline Condition::Condition() : Condition(PRIVATE) {
+        }
+        inline Condition::Condition(int type) {
+            pthread_condattr_t attr;
+            pthread_condattr_init(&attr);
+            #if defined(__linux__)
+                pthread_condattr_setclock(&attr, CLOCK_MONOTONIC);
+            #endif
+
+            if (type == SHARED) {
+                pthread_condattr_setpshared(&attr, PTHREAD_PROCESS_SHARED);
+            }
+
+            pthread_cond_init(&mCond, &attr);
+            pthread_condattr_destroy(&attr);
+
+        }
+        inline Condition::~Condition() {
+            pthread_cond_destroy(&mCond);
+        }
+        inline status_t Condition::wait(Mutex& mutex) {
+            return -pthread_cond_wait(&mCond, &mutex.mMutex);
+        }
+        inline status_t Condition::waitRelative(Mutex& mutex, nsecs_t reltime) {
+            struct timespec ts;
+            #if defined(__linux__)
+                clock_gettime(CLOCK_MONOTONIC, &ts);
+            #else // __APPLE__
+                // Apple doesn't support POSIX clocks.
+                struct timeval t;
+                gettimeofday(&t, NULL);
+                ts.tv_sec = t.tv_sec;
+                ts.tv_nsec = t.tv_usec*1000;
+            #endif
+
+            // On 32-bit devices, tv_sec is 32-bit, but `reltime` is 64-bit.
+            int64_t reltime_sec = reltime/1000000000;
+
+            ts.tv_nsec += static_cast<long>(reltime%1000000000);
+            if (reltime_sec < INT64_MAX && ts.tv_nsec >= 1000000000) {
+                ts.tv_nsec -= 1000000000;
+                ++reltime_sec;
+            }
+
+            int64_t time_sec = ts.tv_sec;
+            if (time_sec > INT64_MAX - reltime_sec) {
+                time_sec = INT64_MAX;
+            } else {
+                time_sec += reltime_sec;
+            }
+
+            ts.tv_sec = (time_sec > LONG_MAX) ? LONG_MAX : static_cast<long>(time_sec);
+
+            return -pthread_cond_timedwait(&mCond, &mutex.mMutex, &ts);
+        }
+        inline void Condition::signal() {
+            pthread_cond_signal(&mCond);
+        }
+        inline void Condition::broadcast() {
+            pthread_cond_broadcast(&mCond);
+        }
+    注:
+        和 Mutex 类似, Condition 类的实现也只是对 Linux 的 "pthread_cond_***" 系列函数进行了简单的封装而已.
+
+
+
+6.3 Android Java层的同步机制
+    Java 语言和 C/C++ 语言不一样, Java 语言中提供了同步关键字 synchronized 来支持线程间的同步操作.
+
+6.3.1 同步关键字 synchronized
+    synchronized 关键字最常见的用法是保护一段代码, 如下所示:    实例对象的成员变量 private String mLock;
+    synchronized 还可以用在类的方法前面, 如下所示:             实例对象本身 this
+    synchronized 的第三种用法是修饰一个静态方法, 如下所示:      类本身
+    注:
+        这 3 种使用方法的含义有很大区别.
+        首先要理解, synchronized 锁住的是对象, 而不是一段代码.
+        在 Java 中, 每个对象都可以是一把锁, 这意味着每个 Java 对象都有类似 native 层的 Mutex 对象的功能.
+        而 synchronized 关键字则和 native 层的 AutoLock 类似, 起到的是自动加锁和解锁的作用.
+
+    使用 synchronized 保护一段代码, 上锁的对象是实例对象的成员变量
+    使用 synchronized 修饰一个非静态方法, 上锁的对象是实例对象本身, this
+    使用 synchronized 修饰一个静态方法, 上锁的对象是类本身
+
+
+
+6.3.2 Object类在同步中的作用
+    synchronized 关键字只能提供互斥访问的同步机制, 如果需要完成一些更复杂的同步操作, 就需要 Object 类来配合完成.
+
+    Object 类是所有 Java 对象的基类, 在 Object 类中提供了一些与同步相关的方法, 如下所示:
+        notify()
+        notifyAll()
+        wait()
+        wait(long millis)
+        wait(long millis, int nanos)
+    注:
+        同步相关的接口分为 notify 和 wait 两种类型.
+        notify 类型的函数用来唤醒挂起的线程, 唤醒别人
+        wait 类型的函数用来挂起调用者所在的线程, 挂起调用者所在的线程, 即将自己挂起.
+    注意:
+        这些方法并不是随时随地都可以调用的, 对它们的调用必须是在本线程取得对 "Object 对象" 的控制权以后才能进行.
+        更准确的说, 应该在 synchronized 的作用域内调用.
+
+
+    这可能有点不太好理解, 下面来看一个使用 Object 对象做同步控制的例子, 代码如下:
+
+
+
+6.4 Android的消息机制
+    消息驱动是一种进程或线程的运行模式.
+    内部和外部的各种事件都可以放到消息队列中按序处理, 这种模式特别适合处理大量的交互事件.
+
+    Android 应用的 UI 线程, 同样采用了消息驱动模式, 所有外部来的按键消息, 触屏消息, 各种系统 Intent, 广播等都会转化为内部的消息, 然后在主线程中分发处理.
+
+
+6.4.1 消息模型
+    现在的操作系统普遍采用消息驱动模式.
+
+    Android 中的消息队列和某个线程关联在一起. 每个线程最多有一个消息队列, 消息的取出和处理在线程中完成.
+
+    Android 的消息模型相对复杂很多, 使用前必须为线程构造消息队列, 发送消息也必须先得到消息队列的 Handler 对象.
+
+    Android 的消息队列在各个线程中, 线程内部的消息发送完全没有额外的开销.
+    在程序设计时, 可以根据需要在合适的线程中设置消息队列, 线程内部的消息在本线程的消息队列中循环,
+    除非必要才向另外的线程发送消息, 因此最大程度的减少了因线程同步带来的系统开销.
+    Android 的消息处理方式非常灵活, 消息处理的代码可以集中在一起, 也可以分散在各个 Handler 对象中, 甚至每条 Message 都能有自己的消息处理方法.
+
+    Android 中与消息机制相关的类主要是 Looper, MessageQueue, Message 和 Handler.
+
+    1. Looper 类
+        Looper 对象是线程的消息循环处理器, 每个线程只能有一个 Looper 对象.
+        Looper 内部有一个消息队列 MessageQueue, 所有线程的消息都存放在这个队列中.
+        新创建一个线程时, 系统并不会马上为这个线程创建一个 Looper 对象, 需要开发者自己创建.
+        Android 在启动时, 为主线程(UI 线程) 创建了一个 Looper 对象.
+
+    2. Handler 类
+        Handler 对象是 Message 的接收者和处理者.
+        用户使用 Handler 对象把 Message 添加到消息队列中, 同时通过 Handler 的回调方法 handleMessage() 来对消息队列中的 Message 进行处理.
+
+        Handler 对象在构造时和某个 Looper 对象关联在一起.
+        Handler 和 Looper 是多对一的关系, 多个 Handler 对象可以和一个 Looper 对象关联起来, 反之则不行.
+
+    3. Message 类
+        Message 是消息的载体. Message 设计成为 Parcelable 类的派生类, 这表明 Message 可以通过 binder 来跨进程发送.
+
+
+    图 6.2 表示了这些类之间的关系.
+    图 6.2 Android 消息处理类关系图.
+        Thread
+        sThreadLocal   --->     Looper
+                                mQueue      --->    MessageQueue
+                                |     |                Message
+                                |     |                Message
+                            Handler  Handler           Message
+                            mLooper  mLooper
+
+
+6.4.2 理解 Looper 类
+    Looper 类的主要成员变量和方法如下:
+        public final class Looper {
+            static final ThreadLocal<Looper> sThreadLocal = new ThreadLocal<Looper>();
+            private static Looper sMainLooper;  // guarded by Looper.class
+            final MessageQueue mQueue;
+            final Thread mThread;
+
+            public static void prepare()
+            public static void prepareMainLooper()
+            public static Looper getMainLooper()
+            public static void loop()
+            public static Looper myLooper()
+            public static MessageQueue myQueue()
+            public void quit()
+            public void quitSafely()
+        }
+    注意:
+        每个线程只能有一个 Looper 类的实例对象, Looper 类实例必须通过方法 prepare() 创建.
+        prepare() 方法会创建一个 Looper 类的对象, 并把它保存在静态变量 sThreadLocal 中.
+        一个线程中多次调用 prepare() 方法将会抛出异常.
+
+    下面看 prepare() 函数实现代码:
+        private static void prepare(boolean quitAllowed) {
+            if (sThreadLocal.get() != null) {
+                throw new RuntimeException("Only one Looper may be created per thread");
+            }
+            sThreadLocal.set(new Looper(quitAllowed));  // 创建 Looper 对象并保存到 sThreadLocal
+        }
+
+    创建完 Looper 对象后, 通过 myLooper() 可以获取 Looper 对象, 下面看 myLooper() 函数实现代码:
+        public static @Nullable Looper myLooper() {
+            return sThreadLocal.get();
+        }
+    注意:
+        静态变量 sThreadLocal 的类型是模板类 ThreadLocal<Looper>, 它通过将需要保存的对象和线程 id 关联在一起的方式实现了线程本地存储的功能.
+        这样放入 sThreadLocal 对象中的 Looper 对象就和创建它的线程关联在一起了.
+
+        Looper 类的 getMainLooper() 方法将返回主线程的 Looper 对象.
+        Android 应用启动时会创建主线程, 同时会创建一个 Looper 对象和主线程相关联.
+        但是创建主线程的代码在 Framework 中, 应用层不能直接取得主线程的 Looper 对象.
+        因此, Android 将获得主线程 Looper 对象的方法放在了 Looper 类中, 如下所示.
+
+
+    下面看 getMainLooper() 函数的实现代码如下:
+        public static Looper getMainLooper() {
+            synchronized (Looper.class) {
+                return sMainLooper;
+            }
+        }
+
+    有了 Looper 类的对象后, 就可以调用 Looper 类的 loop() 方法来进入消息循环.
+    loop() 是一个静态的方法, 它里面有一个无限 for 循环, 对 loop() 方法的调用一般在线程的 run() 方法中.
+
+    Looper 类的典型用法如下:
+        class MyThread extends Thread {
+            public void run() {
+                Looper.prepare()
+                Looper.loop();
+                ......
+            }
+        }
+
+    loop() 方法的主要作用是分发消息队列中的消息, 函数的代码如下:
+        public static void loop() {
+                final Looper me = myLooper();
+                final MessageQueue queue = me.mQueue;
+                ......
+
+                for (;;) {
+                    Message msg = queue.next(); // 取下一条消息, 没有消息会阻塞 - might block
+                    if (msg == null) {          // msg 等于 null 表示接到了退出的请求
+                        return;
+                    }
+                    ......
+                    try {
+                        msg.target.dispatchMessage(msg);    // 分发消息
+                    }
+                    ......
+                    msg.recycleUnchecked();
+                }
+            }
+    注:
+        loop() 方法会循环从 MessageQueue 队列中取出消息, 然后把消息分发出去.
+        消息分发是通过 Message 对象中的 target 变量完成的, 这个变量的类型是 Handler.
+        前面已经介绍了, 一个 Looper 对象可以对应多个 Handler 对象, 线程的 Looper 对象并不是只和一个 Handler 对象相关联.
+
+        Message 对象创建的时候就需要就需要指定它的处理对象.
+
+
+
+6.4.3 理解 Handler 类
+    Handler 类主要负责消息的发送和处理.
+
+6.4.4 消息的同步—— Message 类的 setAsynchronous() 方法
+
+6.4.5 分析 MessageQueue 类
+
+
+
+6.5 进程间的消息传递
+    6.5.1 理解Messenger类
+    6.5.2 建立通信通道—— AsyncChannel类的作用
+
+
+/system/core/adb/commandline.cpp
+/system/core/fastboot/fastboot.cpp
+
+/system/core/init/init.cpp
+
+

@@ -1,17 +1,902 @@
 第五章 连接 Java 和 C/C++ 层的关键－ Android 的 JNI
 
+
+
+JNI 在 Android 中起着连接 Java层 和 C/C++层的作用, 本章主要介绍 Android JNI 的使用方法及 JNI环境.
+
+
 5.1 JNI的作用
+    JNI 是 Java Native Interface (Java 本地接口) 的缩写.
+    JNI 不是 Android 专有的, 它是从 Java 继承而来的, 只不过在 Android 中, JNI 的作用和重要性大大增强了.
+    Android 作为一种嵌入式操作系统, 有大量驱动和硬件相关的功能必须在 native 层实现, 注重性能和功耗的功能使用C/C++来实现也优于用 Java 来实现, 因此,系统级和应用级的开发都离不开 JNI.
+    在 Android 中, Java 层主要负责 UI 功能的实现, C/C++ 层则负责完成一些复杂的算法以及和底层的交互功能, 因此, Android 中 Java 层和 C/C++ 层经常要互相调用, 交互非常频繁.
+
+    Java 语言的执行离不开虚拟机, 因此, 当需要在 Java 代码中调用 C/C++ 层的函数时, 需要告诉虚拟机哪个方法代表本地函数, 以及在哪里能找到这个函数, C/C++ 代码中调用 Java 层的函数也是这样.
+    但是这两者之间是有区别的, 从 Java 到 C/C++ 建立的是函数间的关联; 而从 C/C++ 到 Java 必须先得到 Java 对象的引用, 才能调用该对象的方法.
+    这是因为 Java 是纯粹的面向对象的语言, 所以从 C/C++ 中调用 Java 必须和对象打交道, 而不是像 C/C++ 中对象和函数可以混用.
+
+    Java层 和 C/C++层的关系如下图所示, 一定要注意的是无论是从 Java 到 C/C++, 还是从 C/C++ 到 Java, 中间都没有跨线程调用, 两者在一个线程中运行.
+                      Dalvik虚拟机
+          Java 层 <-->    JNI    <--> C/C++层
+
+    之所以会出现各自打印的 log 中, 线程 Id 的值不同, 是因为两者所使用的线程 Id 表示方法不同而已.
+    Java 层的线程 Id 是一个从 1 开始的整数, C/C++ 层使用的则是一个与线程相关的数据结构的指针值, 两者间不能进行比较.
+    在Android开发中, 掌握 JNI 的使用方法, 掌握 JNI 相关的语法和函数是对开发人员的基本要求之一.
+
+
+
+
+
 5.2 JNI用法介绍
-5.2.1 从Java到C/C
-5.2.2 从C/C 到Java的调用
+
+5.2.1 从 Java 到 C/C++
+
+    1. 装载 JNI 动态库
+        为了使用 JNI, 在调用本地方法前必须把 C/C++ 代码所在的动态库装载到进程的内存空间中. 装载库文件的代码如下:
+
+            System.loadLibrary(libName);
+
+        Android JNI 动态库的名称必须以 "lib" 开头, 这里的传入的参数必须去掉前缀 "lib" 和 后缀 ".so" 的中间部分, 如: libmyjni.so <--> System.loadLibrary("myjni")
+        这里为什么不使用文件名的全程呢, 因为不同平台动态库的后缀名不一样, Linux 下的是 .so, windows 下的是 .dll, 为适配不同的平台, 这里的入参需要去掉和平台相关的部分.
+        调用 loadLibrary() 时不需要指定库文件所在的路径, Android 会在几个系统目录下查找动态库.
+
+        为了保证动态库在被调用之前加载, loadLibrary()的调用位置一般放在类的 static 块中, 这样进程初始化时就能执行装载语句了, 例如:
+            package android.media.audiofx;
+            public class AudioEffect {
+                static {
+                    System.loadLibrary("audioeffect_jni");
+                    native_init();
+                }
+                ......
+            }
+
+        下面看 System.loadLibrary()函数的调用流程:
+        System.loadLibrary(libname) --> Runtime.getRuntime().loadLibrary0(loader, libname)
+                                    --> Runtime.nativeLoad(filename, loader)
+                                    --> Runtime_nativeLoad()
+                                    --> JVM_NativeLoad()
+
+        下面看 Runtime_nativeLoad()函数代码, 代码路径 /libcore/ojluni/src/main/native/Runtime.c
+            JNIEXPORT jstring JNICALL
+            Runtime_nativeLoad(JNIEnv* env, jclass ignored, jstring javaFilename, jobject javaLoader) {
+                return JVM_NativeLoad(env, javaFilename, javaLoader);
+            }
+
+            static JNINativeMethod gMethods[] = {
+              FAST_NATIVE_METHOD(Runtime, freeMemory, "()J"),
+              FAST_NATIVE_METHOD(Runtime, totalMemory, "()J"),
+              FAST_NATIVE_METHOD(Runtime, maxMemory, "()J"),
+              NATIVE_METHOD(Runtime, gc, "()V"),
+              NATIVE_METHOD(Runtime, nativeExit, "(I)V"),
+              // Java 层 Runtime.nativeLoad() 方法注册在本地的方法名是Runtime_nativeLoad
+              NATIVE_METHOD(Runtime, nativeLoad, "(Ljava/lang/String;Ljava/lang/ClassLoader;)Ljava/lang/String;"),
+            };
+
+            //注册gMethods中的方法，这个函数是直接由虚拟机调用
+            void register_java_lang_Runtime(JNIEnv* env) {
+              jniRegisterNativeMethods(env, "java/lang/Runtime", gMethods, NELEM(gMethods));
+            }
+
+        下面看 JVM_NativeLoad() 函数原型声明, 代码路径 /libcore/ojluni/src/main/native/jvm.h
+            JNIEXPORT jstring JVM_NativeLoad(JNIEnv* env, jstring javaFilename, jobject javaLoader);
+
+        下面看  JVM_NativeLoad() 函数在 OpenjdkJvm 中的实现, 代码路径 /art/openjdkjvm/OpenjdkJvm.cc
+            #include "../../libcore/ojluni/src/main/native/jvm.h"
+            JNIEXPORT jstring JVM_NativeLoad(JNIEnv* env, jstring javaFilename, jobject javaLoader) {
+                ScopedUtfChars filename(env, javaFilename);
+                std::string error_msg; {
+                    art::JavaVMExt* vm = art::Runtime::Current()->GetJavaVM();  // 调用 GetJavaVM() 获取 JavaVMExt 对象
+                    bool success = vm->LoadNativeLibrary(env, filename.c_str(), javaLoader, &error_msg); // 调用 JavaVMExt 的 LoadNativeLibrary 方法
+                    if (success) {
+                        return nullptr;
+                    }
+                }
+                env->ExceptionClear();
+                return env->NewStringUTF(error_msg.c_str());
+            }
+
+        下面看 GetJavaVM() 函数代码, 代码路径 /art/runtime/runtime.h
+            JavaVMExt* GetJavaVM() const {
+                return java_vm_.get();
+            }
+
+        下面看 LoadNativeLibrary() 函数代码, 代码路径 /art/runtime/java_vm_ext.cc
+            bool JavaVMExt::LoadNativeLibrary(JNIEnv* env, const std::string& path, jobject class_loader, std::string* error_msg) {
+              SharedLibrary* library;   //创建SharedLibrary对象
+              Thread* self = Thread::Current(); {
+                MutexLock mu(self, *Locks::jni_libraries_lock_);
+                library = libraries_->Get(path);    //实例化library对象
+              }
+              void* class_loader_allocator = nullptr; {
+                ScopedObjectAccess soa(env);
+                ObjPtr<mirror::ClassLoader> loader = soa.Decode<mirror::ClassLoader>(class_loader);
+
+                ClassLinker* class_linker = Runtime::Current()->GetClassLinker();   //获取ClassLinker对象
+                if (class_linker->IsBootClassLoader(soa, loader.Ptr())) {
+                  loader = nullptr;
+                  class_loader = nullptr;
+                }
+
+                class_loader_allocator = class_linker->GetAllocatorForClassLoader(loader.Ptr());
+              }
+              if (library != nullptr) {
+                if (library->GetClassLoaderAllocator() != class_loader_allocator) {
+                  auto call_to_string = [&](jobject obj) -> std::string {
+                    if (obj == nullptr) {
+                      return "null";
+                    }
+                    ScopedLocalRef<jobject> local_ref(env, env->NewLocalRef(obj));
+                    if (local_ref != nullptr) {
+                      ScopedLocalRef<jclass> local_class(env, env->GetObjectClass(local_ref.get()));
+                      jmethodID to_string = env->GetMethodID(local_class.get(), "toString", "()Ljava/lang/String;");
+                      ScopedLocalRef<jobject> local_string(env, env->CallObjectMethod(local_ref.get(), to_string));
+                      if (local_string != nullptr) {
+                        ScopedUtfChars utf(env, reinterpret_cast<jstring>(local_string.get()));
+                        if (utf.c_str() != nullptr) {
+                          return utf.c_str();
+                        }
+                      }
+                      env->ExceptionClear();
+                      return "(Error calling toString)";
+                    }
+                    return "null";
+                  };
+                  std::string old_class_loader = call_to_string(library->GetClassLoader());
+                  std::string new_class_loader = call_to_string(class_loader);
+                  return false;
+                }
+                // Shared library already loaded in path
+                if (!library->CheckOnLoadResult()) {
+                  //JNI_OnLoad failed
+                  return false;
+                }
+                return true;
+              }
+
+              ScopedLocalRef<jstring> library_path(env, GetLibrarySearchPath(env, class_loader));
+
+              Locks::mutator_lock_->AssertNotHeld(self);
+              const char* path_str = path.empty() ? nullptr : path.c_str();
+              bool needs_native_bridge = false;
+              // 调用 OpenNativeLibrary()
+              void* handle = android::OpenNativeLibrary(env, runtime_->GetTargetSdkVersion(), path_str, class_loader, library_path.get(), &needs_native_bridge, error_msg);
+              if (handle == nullptr) {
+                return false;
+              }
+
+              if (env->ExceptionCheck() == JNI_TRUE) {
+                env->ExceptionDescribe();
+                env->ExceptionClear();
+              }
+              // Create a new entry.
+              bool created_library = false; {
+                std::unique_ptr<SharedLibrary> new_library(new SharedLibrary(env, self, path, handle, needs_native_bridge, class_loader, class_loader_allocator));
+
+                MutexLock mu(self, *Locks::jni_libraries_lock_);
+                library = libraries_->Get(path);
+                if (library == nullptr) {  // We won race to get libraries_lock.
+                  library = new_library.release();
+                  libraries_->Put(path, library);   //将我们指定的库加载进来，保存在library对象中
+                  created_library = true;
+                }
+              }
+              if (!created_library) {
+                return library->CheckOnLoadResult();
+              }
+
+              bool was_successful = false;
+              //在我们要加载so库中查找JNI_OnLoad方法，如果没有系统就认为是静态注册方式进行的，直接返回true，代表so库加载成功，如果找到JNI_OnLoad就会调用JNI_OnLoad方法，JNI_OnLoad方法中一般存放的是方法注册的函数，所以如果采用动态注册就必须要实现JNI_OnLoad方法，否则调用java中申明的native方法时会抛出异常，下面有JNI_OnLoad的实现
+              void* sym = library->FindSymbol("JNI_OnLoad", nullptr);
+              if (sym == nullptr) {
+                // No JNI_OnLoad found in path
+                was_successful = true;
+              } else {
+                // Call JNI_OnLoad.
+                ScopedLocalRef<jobject> old_class_loader(env, env->NewLocalRef(self->GetClassLoaderOverride()));
+                self->SetClassLoaderOverride(class_loader);
+
+                // Calling JNI_OnLoad in path
+                typedef int (*JNI_OnLoadFn)(JavaVM*, void*);
+                //sym是void*类型的，任何一个类型都可以用void*类型进行传递，但是void*类型是不能够调用的，所用在调用之前，需要将void*代表的类型转换为其原来的类型，在这里，把sym重新解释为JNI_OnLoadFn，sym指向的是JNI_OnLoad，JNI_OnLoad和JNI_OnLoadFn是相同的类型，其实在我的理解中就是让JNI_OnLoadFn指向JNI_OnLoad函数的地址，这样调用JNI_OnLoadFn就像调用JNI_OnLoad一样.
+                JNI_OnLoadFn jni_on_load = reinterpret_cast<JNI_OnLoadFn>(sym);
+                //调用JNI_OnLoad函数，version为JNI_OnLoad函数的返回值
+                int version = (*jni_on_load)(this, nullptr);
+                //判断SDK版本
+                if (runtime_->GetTargetSdkVersion() != 0 && runtime_->GetTargetSdkVersion() <= 21) {
+                  EnsureFrontOfChain(SIGSEGV);
+                }
+                self->SetClassLoaderOverride(old_class_loader.get());
+                if (version == JNI_ERR) {   //判断返回值是否异常
+                } else if (JavaVMExt::IsBadJniVersion(version)) {   //判断返回值是否符合标准
+                } else {
+                  was_successful = true;
+                }
+              }
+              library->SetResult(was_successful);
+              return was_successful;
+            }
+
+            //下面这个函数告诉我们本地的JNI_OnLoad函数必须返回JNI_VERSION_1_2、JNI_VERSION_1_4或者JNI_VERSION_1_6这三个值才算成功否则都是失败
+            bool JavaVMExt::IsBadJniVersion(int version) {
+              // We don't support JNI_VERSION_1_1. These are the only other valid versions.
+              return version != JNI_VERSION_1_2 && version != JNI_VERSION_1_4 && version != JNI_VERSION_1_6;
+            }
+
+    2. 定义 native 方法
+        在 Java 类中定义 native 方法很简单, 在方法前面加 "native" 关键字就可以了, 例如:
+            private static native final void native_init();
+            private native final void native_finalize();
+            private native final void native_release();
+            private native final int native_setEnabled(boolean enabled);
+        注:
+            在 native 方法中, 可以使用任意类型作为参数, 包括基本的对象类型, 数组类型, 复杂对象等, 同时在 Java 中调用 native 方法和调用普通方法没有区别.
+
+    3. 编写 JNI 动态库
+        JNI 动态库和非 JNI 动态库的区别是: JNI 动态库中定义了一个名为"JNI_OnLoad"的函数, 这个函数在动态库加载后会被系统调用, 用于完成 JNI 函数的注册.
+
+        下面看 JNI_OnLoad() 函数的原型定义如下, 代码路径 /libnativehelper/include_jni/jni.h
+            JNIEXPORT jint JNI_OnLoad(JavaVM* vm, void* reserved);
+        注:
+            在 JNI_OnLoad() 函数中, 最重要的一件事就是调用 registerNativeMethods() 函数来完成动态库中 JNI 函数的注册,
+            所谓注册, 就是通过一张表把 java 类中定义的 native 方法和本地的 C 函数联系起来, 这样 art 虚拟机在解析 Java 类中的 native 方法时就能查找到本地对应的C函数。
+
+        接下来我们来看一下 JNI_OnLoad函数
+
+
+
+        下面是一个简单的例子, 接着看 AudioEffect 类中 native 方法的注册, 代码路径 /frameworks/base/media/jni/audioeffect/android_media_AudioEffect.cpp.
+
+            jint JNI_OnLoad(JavaVM* vm, void* reserved __unused) {  // JNI_OnLoad方法，调用 register_android_media_AudioEffect() 方法
+                JNIEnv* env = NULL;
+                jint result = -1;
+                if (vm->GetEnv((void**) &env, JNI_VERSION_1_4) != JNI_OK) {
+                    goto bail;
+                }
+                if (register_android_media_AudioEffect(env) < 0) {  //调用register_android_media_MediaPlayer方法进行注册
+                    goto bail;
+                }
+                if (register_android_media_visualizer(env) < 0) {
+                    goto bail;
+                }
+                result = JNI_VERSION_1_4;
+            bail:
+                return result;
+            }
+
+            // 调用 registerNativeMethods() 对 gMethods 中的方法进行注册
+            int register_android_media_AudioEffect(JNIEnv *env) {
+                return AndroidRuntime::registerNativeMethods(env, kClassPathName, gMethods, NELEM(gMethods));
+            }
+
+            static const char* const kClassPathName = "android/media/audiofx/AudioEffect";
+
+            // 将需要注册的方法都放到gMethods数组中
+            static const JNINativeMethod gMethods[] = {
+                {"native_init",          "()V",      (void *)android_media_AudioEffect_native_init},
+                {"native_setup",         "(Ljava/lang/Object;Ljava/lang/String;Ljava/lang/String;II[I[Ljava/lang/Object;Ljava/lang/String;)I",
+                                                     (void *)android_media_AudioEffect_native_setup},
+                {"native_finalize",      "()V",      (void *)android_media_AudioEffect_native_finalize},
+                {"native_release",       "()V",      (void *)android_media_AudioEffect_native_release},
+                {"native_setEnabled",    "(Z)I",      (void *)android_media_AudioEffect_native_setEnabled},
+                {"native_getEnabled",    "()Z",      (void *)android_media_AudioEffect_native_getEnabled},
+                {"native_hasControl",    "()Z",      (void *)android_media_AudioEffect_native_hasControl},
+                {"native_setParameter",  "(I[BI[B)I",  (void *)android_media_AudioEffect_native_setParameter},
+                {"native_getParameter",  "(I[BI[B)I",  (void *)android_media_AudioEffect_native_getParameter},
+                {"native_command",       "(II[BI[B)I", (void *)android_media_AudioEffect_native_command},
+                {"native_query_effects", "()[Ljava/lang/Object;", (void *)android_media_AudioEffect_native_queryEffects},
+                {"native_query_pre_processing", "(I)[Ljava/lang/Object;", (void *)android_media_AudioEffect_native_queryPreProcessings},
+            };
+
+
+        下面看 registerNativeMethods() 函数的原型定义如下, 代码路径: /frameworks/base/core/jni/AndroidRuntime.cpp
+            int AndroidRuntime::registerNativeMethods(JNIEnv* env, const char* className, const JNINativeMethod* gMethods, int numMethods) {
+                return jniRegisterNativeMethods(env, className, gMethods, numMethods);
+            }
+            注:
+                第二个参数 className 是指 Java 类的全限定类名, 但是名称中的 "." 要换成 "/", 这是 JNI 的规定. 例如例子中的 kClassPathName.
+                第三个参数 gMethods 是 JNINativeMethod 类型的数组, 下面看 JNINativeMethod 的类型定义.
+
+        下面看结构体 JNINativeMethod 的定义如下, 代码路径 /libnativehelper/include_jni/jni.h
+            typedef struct {
+                const char* name;
+                const char* signature;
+                void* fnPtr;
+            } JNINativeMethod;
+            注:
+                第一个成员变量 name 是指 Java 类中 native 方法的名称;
+                第二个成员变量 signature 是指 native 方法的参数签名 (在接下来的参数签名中会详细介绍);
+                第三个成员变量 fnPtr 是指 native 方法对应的本地函数指针;
+
+                本地函数的原型要求如下:
+                    返回类型 函数名(JNIEnv *env, jobject obj, ......)
+                    注:
+                        其中第一个参数 JNIEnv 是JNI环境, 第二个参数是指调用类的java对象, 后面的省略号和具体方法的参数一致.
+
+                下面是一个本地函数的原型例子:
+                    static jint android_media_AudioEffect_native_command(JNIEnv *env, jobject thiz, jint cmdCode, jint cmdSize, jbyteArray jCmdData, jint replySize, jbyteArray jReplyData) {
+
+    4. 参数签名
+        native 方法的参数签名使用了一些缩写符号来代表参数类型, 这些符号都是 Java 语言规定的, 签名由参数加返回值组成, 参数必须小括号括起来, 没有参数时也要使用一对空括号,
+        参数签名的规范格式是 "(参数)返回值", 例如: "(I)V" 表示方法有一个整形参数, 无返回值; "([IZ)I" 表示方法有两个参数, 第一个是整型数组, 第二个是布尔型, 返回值类型为整型.
+        在 JNI 环境中规定复杂类型的参数签名格式是 "L/全限定类名;" 例如 String 的参数签名是"L/java/lang/String;", 对应的JNI类型为 jstring.
+
+        在 JNI 环境中定义了一些对象来和 Java 中的基本类型相匹配:
+            /* 基本类型 */
+            typedef uint8_t  jboolean; /* unsigned 8 bits */
+            typedef int8_t   jbyte;    /* signed 8 bits */
+            typedef uint16_t jchar;    /* unsigned 16 bits */
+            typedef int16_t  jshort;   /* signed 16 bits */
+            typedef int32_t  jint;     /* signed 32 bits */
+            typedef int64_t  jlong;    /* signed 64 bits */
+            typedef float    jfloat;   /* 32-bit IEEE 754 */
+            typedef double   jdouble;  /* 64-bit IEEE 754 */
+            typedef jint     jsize;    /* "cardinal indices and sizes" */
+
+            /* C++ 中的引用类型*/
+            class _jobject {};
+            class _jclass : public _jobject {};
+            class _jstring : public _jobject {};
+            class _jarray : public _jobject {};
+            class _jobjectArray : public _jarray {};
+            class _jbooleanArray : public _jarray {};
+            class _jbyteArray : public _jarray {};
+            class _jcharArray : public _jarray {};
+            class _jshortArray : public _jarray {};
+            class _jintArray : public _jarray {};
+            class _jlongArray : public _jarray {};
+            class _jfloatArray : public _jarray {};
+            class _jdoubleArray : public _jarray {};
+            class _jthrowable : public _jobject {};
+            typedef _jobject*       jobject;
+            typedef _jclass*        jclass;
+            typedef _jstring*       jstring;
+            typedef _jarray*        jarray;
+            typedef _jobjectArray*  jobjectArray;
+            typedef _jbooleanArray* jbooleanArray;
+            typedef _jbyteArray*    jbyteArray;
+            typedef _jcharArray*    jcharArray;
+            typedef _jshortArray*   jshortArray;
+            typedef _jintArray*     jintArray;
+            typedef _jlongArray*    jlongArray;
+            typedef _jfloatArray*   jfloatArray;
+            typedef _jdoubleArray*  jdoubleArray;
+            typedef _jthrowable*    jthrowable;
+            typedef _jobject*       jweak;
+
+            /* C 中的引用类型 */
+            typedef void*           jobject;
+            typedef jobject         jclass;
+            typedef jobject         jstring;
+            typedef jobject         jarray;
+            typedef jarray          jobjectArray;
+            typedef jarray          jbooleanArray;
+            typedef jarray          jbyteArray;
+            typedef jarray          jcharArray;
+            typedef jarray          jshortArray;
+            typedef jarray          jintArray;
+            typedef jarray          jlongArray;
+            typedef jarray          jfloatArray;
+            typedef jarray          jdoubleArray;
+            typedef jobject         jthrowable;
+            typedef jobject         jweak;
+
+            typedef union jvalue {
+                jboolean    z;      // boolean
+                jbyte       b;      // byte
+                jchar       c;      // char
+                jshort      s;      // short
+                jint        i;      // int
+                jlong       j;      // long
+                jfloat      f;      // float
+                jdouble     d;      // double
+                jobject     l;      // object
+            } jvalue;
+
+        参数签名中数组的表示方法是在基本类型符号前加上符号"[", 代表数组的意思, 如下表所示:
+            [Z          jbooleanArray;      // boolean[]
+            [B          jbyteArray;         // byte[]
+            [C          jcharArray;         // char[]
+            [S          jshortArray;        // short[]
+            [I          jintArray;          // int[]
+            [J          jlongArray;         // long[]
+            [F          jfloatArray;        // float[]
+            [D          jdoubleArray;       // double[]
+            [L          jobjectArray;       // object[]
+
+
+    5. 如何使用 JNI 类型
+        (1) Java 的基本类型都是无符号的, 但是对应的 JNI 类型可不都是无符号的, 下面是这些 JNI 类型的定义:
+            typedef uint8_t  jboolean; /* unsigned 8 bits       无符号 1 字节*/
+            typedef int8_t   jbyte;    /* signed 8 bits         有符号 1 字节*/
+            typedef uint16_t jchar;    /* unsigned 16 bits      无符号 2 字节*/
+            typedef int16_t  jshort;   /* signed 16 bits        有符号 2 字节*/
+            typedef int32_t  jint;     /* signed 32 bits        有符号 4 字节*/
+            typedef int64_t  jlong;    /* signed 64 bits        有符号 8 字节*/
+            typedef float    jfloat;   /* 32-bit IEEE 754       4 字节 IEEE 754 格式*/
+            typedef double   jdouble;  /* 64-bit IEEE 754       8 字节 IEEE 754 格式*/
+            typedef jint     jsize;    /* "cardinal indices and sizes" 有符号 4 字节*/
+        注:
+            所有这些JNI类型可以和基本类型一样直接使用.
+
+        (2) JNI的数组类型, 如 jbyteArray, jcharArray 其实只是 jarray 通过 typedef 定义出来的别名, 在 JNIEnv 中也定义了与数组相关的操作函数.
+            如果需要知道数组的元素个数, 可以调用 GetArrayLength() 函数, 原型是:
+                jsize GetArrayLength(jarray array) {
+                    return functions->GetArrayLength(this, array);
+                }
+            如果要将 JNI 的数组类型转换成基本数组类型, 也需要调用 JNIEnv 中定义的函数来完成, 每种基本类型都有自己的转换, 例如 int 类型的转换函数是:
+                jint* GetIntArrayElements(jintArray array, jboolean* isCopy) {
+                    return functions->GetIntArrayElements(this, array, isCopy);
+                }
+            返回的数组内存是在函数内分配的, 用完后必须释放掉, 否则就会造成内存泄漏. int 类型的释放函数为:
+                void ReleaseIntArrayElements(jintArray array, jint* elems, jint mode) {
+                    functions->ReleaseIntArrayElements(this, array, elems, mode);
+                }
+
+        (3) jstring 本质上也是 jobject 类, 但是因为使用频率较高, 所以单独定义了操作函数, 方便开发人员使用, jstring 使用前也需要进行转换, 使用完后同样要记得释放内存.
+            如果需要转换成 utf-8 的字符串, 相关的函数原型是:
+                    jstring NewStringUTF(const char* bytes)
+                    jsize GetStringUTFLength(jstring string)
+                    const char* GetStringUTFChars(jstring string, jboolean* isCopy)
+                    void ReleaseStringUTFChars(jstring string, const char* utf)
+
+            如果需要转换成 unicode 的字符串, 相关的函数原型是:
+                jstring NewString(const jchar* unicodeChars, jsize len)
+                jsize GetStringLength(jstring string)
+                const jchar* GetStringChars(jstring string, jboolean* isCopy)
+                void ReleaseStringChars(jstring string, const jchar* chars)
+
+        (4) 如果一次只取一个数组的元素, 可以使用下面的函数, 也不用释放内存, 更加方便.
+                jobject GetObjectArrayElement(jobjectArray array, jsize index)
+                void SetObjectArrayElement(jobjectArray array, jsize index, jobject value)
+
+    6. 一个使用 jstring 数组的例子
+        下面看一个使用 String 数组的例子, 参数和返回值都是 String 数组类型. 通过这个复杂例子的学习, 我们能更好的掌握 JNI 的用法.
+            Java 层的 native 方法定义为:
+
+        下面看看Android中Alarm的jni方法注册：
+
+5.2.2 从 C/C++ 到 Java 的调用
+    1. 生成 Java 对象
+        在 JNIEnv 中生成一个 Java 对象可以使用函数 NewObject(), 函数原型如下:
+            jobject NewObject(jclass clazz, jmethodID methodID, ...) {
+                va_list args;
+                va_start(args, methodID);
+                jobject result = functions->NewObjectV(this, clazz, methodID, args);
+                va_end(args);
+                return result;
+            }
+
+            jobject NewObjectV(jclass clazz, jmethodID methodID, va_list args) {
+                return functions->NewObjectV(this, clazz, methodID, args);
+            }
+
+            jobject NewObjectA(jclass clazz, jmethodID methodID, jvalue* args) {
+                return functions->NewObjectA(this, clazz, methodID, args);
+            }
+        注:
+            其中参数 clazz 是指 Java 类对象(不是类的实例对象), 可以通过函数 FindClass()得到; 参数 methodID 是指 Java 类的构造函数.
+
+
+        FindClass() 函数的原型如下:
+            jclass FindClass(const char* name)
+        注:
+            其中参数 name 是指 Java 类的名称, 如 "/java/lang/String",  jclass 类型用来表示 Java 类, 在 JNI 中, 经常要通过 jclass 来得到 Java 类的成员变量和方法.
+
+
+        调用一个 Java 对象的方法或者存取一个 Java 对象的域变量之前, 要先知道这个方法或域变量的Id. 取得方法Id 和域变量 Id 的函数原型是:
+            jmethodID GetMethodID(jclass clazz, const char* name, const char* sig)
+            jfieldID GetFieldID(jclass clazz, const char* name, const char* sig)
+        注意:
+            其中参数 name 是 Java 类的方法或成员变量的名称, 参数 sig 是参数类型签名.
+            如果要得到一个 Java 对象的构造函数, 使用函数 GetMethodID() 时, 传入的参数 name 必须是 "<init>" 才可以.
+
+            一个生成并调用 Intent 例子如下:
+                jclass cls = (*env)->GetObjectClass(env, context);
+                jmethodID mId = (*env)->GetMethodID( env, cls, "getPackageName", "()Ljava/lang/String;" );
+                jstring pkgName =(*env)->CallObjectMethod(env, context, mId );
+
+                // Get an instance of Intent
+                jclass intentClass = (*env)->FindClass(env,"android/content/Intent");
+                jmethodID newIntent = (*env)->GetMethodID(env,intentClass, "<init>", "()V");
+                jobject intentObject = (*env)->NewObject(env, intentClass, newIntent);
+                (*env)->CallVoidMethod(env,intentObject, newIntent);
+
+                jmethodID setFlags =  (*env)->GetMethodID(env,intentClass, "setFlags","(I)Landroid/content/Intent;");
+                (*env)->CallObjectMethod(env,intentObject, setFlags, 0x10000000);
+
+                jmethodID putExtra =  (*env)->GetMethodID(env,intentClass, "putExtra","(Ljava/lang/String;Ljava/lang/String;)Landroid/content/Intent;");
+                jstring jtype =(*env)->NewStringUTF(env,"type");
+                jstring jtypeval =(*env)->NewStringUTF(env,typevalue);
+                (*env)->CallObjectMethod(env,intentObject, putExtra, jtype,jtypeval);
+
+                // Get an instance of the ComponentName class
+                jclass componentClass = (*env)->FindClass(env,"android/content/ComponentName");
+                jmethodID componentMID = (*env)->GetMethodID(env,componentClass, "<init>", "(Ljava/lang/String;Ljava/lang/String;)V");
+                jstring pkgName =(*env)->NewStringUTF(env,"包名");
+                jstring clsName =(*env)->NewStringUTF(env,"XXX.TestActivity");
+                jobject componentObj = (*env)->NewObject(env,componentClass, componentMID, pkgName, clsName);
+                (*env)->CallVoidMethod(env,componentObj, componentMID, pkgName, clsName);
+
+                // Calling intent.setComponentName passing in pkg+class name
+                jmethodID setComponentName = (*env)->GetMethodID(env,intentClass, "setComponent","(Landroid/content/ComponentName;)Landroid/content/Intent;");
+                (*env)->CallObjectMethod(env,intentObject, setComponentName, componentObj);
+
+                // Call getapplicationcontext().startActivity(intent)
+                jclass activityClass =  (*env)->FindClass(env,"android/app/Activity");
+                jmethodID startActivity = (*env)->GetMethodID(env,activityClass, "startActivity", "(Landroid/content/Intent;)V");
+                (*env)->CallVoidMethod(env,context,startActivity, intentObject);
+
+    2. 调用 Java 类的方法
+        在调用 NewObject() 创建 Java 对象后, 调用此对象的方法就很简单了. JNIEnv 提供了很多调用 Java 类中方法的函数, 这些函数是根据 Java 方法的返回值来定义,
+        例如, 方法的返回值是 int 型, 则需要调用 CallIntMethod(), 这些函数的原型如下:
+            jint  (*CallIntMethod)(JNIEnv*, jobject, jmethodID, ...);
+            jint  (*CallIntMethodV)(JNIEnv*, jobject, jmethodID, va_list);
+            jint  (*CallIntMethodA)(JNIEnv*, jobject, jmethodID, jvalue*);
+
+        如果调用静态方法, 只需要 Java 类的对象就可以了, 不需要类的实例对象, 但是要使用为调用静态 Java 方法而定义的一组函数, 这些函数和调用非静态 Java 方法的函数类似,
+        只不过每条函数的名字里面多了 "Static" 字样, 函数原型如下:
+            jint  (*CallStaticIntMethod)(JNIEnv*, jclass, jmethodID, ...);
+            jint  (*CallStaticIntMethodV)(JNIEnv*, jclass, jmethodID, va_list);
+            jint  (*CallStaticIntMethodA)(JNIEnv*, jclass, jmethodID, jvalue*);
+
+    3. 存取 Java 类的域变量
+        在得到了成员变量的 ID 之后, 对于读和写, JNIEnv 分别定义了一组函数. 同样, 如果是静态变量和非静态变量, 也有不同的函数.
+
+        这些函数在 JNINativeInterface 中定义如下:
+            //非静态变量 Get/Set
+            jfieldID    (*GetFieldID)(JNIEnv*, jclass, const char*, const char*);
+
+            jobject     (*GetObjectField)(JNIEnv*, jobject, jfieldID);
+            jboolean    (*GetBooleanField)(JNIEnv*, jobject, jfieldID);
+            jbyte       (*GetByteField)(JNIEnv*, jobject, jfieldID);
+            jchar       (*GetCharField)(JNIEnv*, jobject, jfieldID);
+            jshort      (*GetShortField)(JNIEnv*, jobject, jfieldID);
+            jint        (*GetIntField)(JNIEnv*, jobject, jfieldID);
+            jlong       (*GetLongField)(JNIEnv*, jobject, jfieldID);
+            jfloat      (*GetFloatField)(JNIEnv*, jobject, jfieldID);
+            jdouble     (*GetDoubleField)(JNIEnv*, jobject, jfieldID);
+
+            void        (*SetObjectField)(JNIEnv*, jobject, jfieldID, jobject);
+            void        (*SetBooleanField)(JNIEnv*, jobject, jfieldID, jboolean);
+            void        (*SetByteField)(JNIEnv*, jobject, jfieldID, jbyte);
+            void        (*SetCharField)(JNIEnv*, jobject, jfieldID, jchar);
+            void        (*SetShortField)(JNIEnv*, jobject, jfieldID, jshort);
+            void        (*SetIntField)(JNIEnv*, jobject, jfieldID, jint);
+            void        (*SetLongField)(JNIEnv*, jobject, jfieldID, jlong);
+            void        (*SetFloatField)(JNIEnv*, jobject, jfieldID, jfloat);
+            void        (*SetDoubleField)(JNIEnv*, jobject, jfieldID, jdouble);
+
+            //静态变量 Get/Set
+            jfieldID    (*GetStaticFieldID)(JNIEnv*, jclass, const char*, const char*);
+
+            jobject     (*GetStaticObjectField)(JNIEnv*, jclass, jfieldID);
+            jboolean    (*GetStaticBooleanField)(JNIEnv*, jclass, jfieldID);
+            jbyte       (*GetStaticByteField)(JNIEnv*, jclass, jfieldID);
+            jchar       (*GetStaticCharField)(JNIEnv*, jclass, jfieldID);
+            jshort      (*GetStaticShortField)(JNIEnv*, jclass, jfieldID);
+            jint        (*GetStaticIntField)(JNIEnv*, jclass, jfieldID);
+            jlong       (*GetStaticLongField)(JNIEnv*, jclass, jfieldID);
+            jfloat      (*GetStaticFloatField)(JNIEnv*, jclass, jfieldID);
+            jdouble     (*GetStaticDoubleField)(JNIEnv*, jclass, jfieldID);
+
+            void        (*SetStaticObjectField)(JNIEnv*, jclass, jfieldID, jobject);
+            void        (*SetStaticBooleanField)(JNIEnv*, jclass, jfieldID, jboolean);
+            void        (*SetStaticByteField)(JNIEnv*, jclass, jfieldID, jbyte);
+            void        (*SetStaticCharField)(JNIEnv*, jclass, jfieldID, jchar);
+            void        (*SetStaticShortField)(JNIEnv*, jclass, jfieldID, jshort);
+            void        (*SetStaticIntField)(JNIEnv*, jclass, jfieldID, jint);
+            void        (*SetStaticLongField)(JNIEnv*, jclass, jfieldID, jlong);
+            void        (*SetStaticFloatField)(JNIEnv*, jclass, jfieldID, jfloat);
+            void        (*SetStaticDoubleField)(JNIEnv*, jclass, jfieldID, jdouble);
+
+
+
+
 5.3 JNI环境
-5.3.1 结构体JNIEnv
+    本节将继续分析 JNI 环境的定义,产生以及一些重要的特性.
+
+5.3.1 结构体 JNIEnv
+    JNIEnv 是代表 JNI 环境的结构体, 定义如下:
+        struct _JNIEnv;
+        struct _JavaVM;
+        typedef const struct JNINativeInterface* C_JNIEnv;
+        #if defined(__cplusplus)
+        typedef _JNIEnv JNIEnv;
+        typedef _JavaVM JavaVM;
+        #else
+        typedef const struct JNINativeInterface* JNIEnv;
+        typedef const struct JNIInvokeInterface* JavaVM;
+        #endif
+    从代码看, JNI的定义区分了 C 和 C++, 因为 Android 中已经定义了宏 __cplusplus, 所以这里可以只关注C++部分的代码, 在C++部分的代码, JNIEnv 等同于结构 _JNIEnv.
+
+    下面是 _JNIEnv 的定义:
+        struct _JNIEnv {
+            const struct JNINativeInterface* functions;
+        #if defined(__cplusplus)
+            jint GetVersion() { return functions->GetVersion(this); }
+            jclass DefineClass(const char *name, jobject loader, const jbyte* buf, jsize bufLen) { return functions->DefineClass(this, name, loader, buf, bufLen); }
+            jclass FindClass(const char* name) { return functions->FindClass(this, name); }
+        #endif
+    结构体中的函数又调用了成员变量 functions 的函数, functions 是指向结构体 JNINativeInterface 的指针.
+
+    下面看 JNINativeInterface 的定义如下:
+        struct JNIInvokeInterface {
+            void*       reserved0;
+            void*       reserved1;
+            void*       reserved2;
+
+            jint        (*DestroyJavaVM)(JavaVM*);
+            jint        (*AttachCurrentThread)(JavaVM*, JNIEnv**, void*);
+            jint        (*DetachCurrentThread)(JavaVM*);
+            jint        (*GetEnv)(JavaVM*, void**, jint);
+            jint        (*AttachCurrentThreadAsDaemon)(JavaVM*, JNIEnv**, void*);
+        };
+    JNIInvokeInterface 中定义的都是函数指针, 这些函数指针又是在哪里初始化的呢? 看看生成 JNIEnv 对象的
+
+
 5.3.2 JNIEnv的创建和初始化
+    JNIEnv 是 JNI 的使用环境, JNIEnv 对象和线程是绑定在一起的, 当我们在 Java 线程中调用 naive 层的 JNI 函数时, 线程所属的 JNIEnv 对象已经生成了吗? 如果生成了, 又是什么时候生成的呢?
+
+    调用 JNI_OnLoad(JavaVM* vm, void* reserved) 函数时需要传递虚拟机 JavaVM 的指针作为参数, 然后通过 JavaVM 的 GetEnv()函数就能得到 JNIEnv 对象的指针.
+    阅读 JavaVM 的 GetEnv()函数源码, 就能发现 JNIEnv 对象在调用 GetEnv()函数之前就已经创建好了.
+
+    Android 应用都是从 Zygote 进程 fork 而来的, 并继承了 Zygote 进程中创建好的 Dalvik 虚拟机.
+    Zygote 进程中创建虚拟机的函数是 JNI_CreateJavaVM(),
+    在 "22.5.2 ART的初始化" 一节中将分析这个函数, 这里只需要了解这个函数中创建了 JNIEnv 对象, 这个对象属于主线程.
+
+    如果 Java 中新创建了线程, 是否也会生成新的 JNIEnv 对象呢? 看看 Java 的 Thread 类如何实现的就知道了.
+
+    Java 中创建新线程是需要调用 Thread 的 start()方法, 这时候因为主线程的 JNI 环境已经建好了, 所以在主线程中已经可以使用 JNI 函数.
+
+    下面看 Java 层 Thread.start()函数的调用流程:
+        Java 层 Thread.start()  --> Thread.nativeCreate(this, stackSize, daemon)     //Java 层 Thread 类中声明的 native 方法
+                                --> Thread_nativeCreate()                            // 调用到 C++ 层
+                                --> Thread::CreateNativeThread()
+                                --> Thread::Init()
+                                --> JNIEnvExt::Create()
+
+        下面看 Thread_nativeCreate() 函数实现代码, 代码路径 /art/runtime/native/java_lang_Thread.cc
+            static void Thread_nativeCreate(JNIEnv* env, jclass, jobject java_thread, jlong stack_size, jboolean daemon) {
+              ......
+              Thread::CreateNativeThread(env, java_thread, stack_size, daemon == JNI_TRUE);
+            }
+
+        下面看 CreateNativeThread() 函数实现代码, 代码路径 /art/runtime/thread.cc
+            void Thread::CreateNativeThread(JNIEnv* env, jobject java_peer, size_t stack_size, bool is_daemon) {
+                ......
+                // 使用 Linux 的线程函数来创建一个新线程, 这个新线程的运行函数是 CreateCallback().
+                pthread_create_result = pthread_create(&new_pthread, &attr, Thread::CreateCallback, child_thread);
+                ......
+            }
+        下面看 CreateCallback() 函数实现代码, 代码路径 /art/runtime/thread.cc
+            void* Thread::CreateCallback(void* arg) {
+              Thread* self = reinterpret_cast<Thread*>(arg);
+              Runtime* runtime = Runtime::Current();
+              if (runtime == nullptr) {
+                return nullptr;
+              }
+              {
+                // 调用 self 的 Init() 函数来初始化线程环境, 其中就会创建一个 JNIEnvExt 对象.
+                CHECK(self->Init(runtime->GetThreadList(), runtime->GetJavaVM(), self->tlsPtr_.tmp_jni_env));
+              }
+            }
+
+        下面看 CreateCallback() 函数实现代码, 代码路径 /art/runtime/thread.cc
+            bool Thread::Init(ThreadList* thread_list, JavaVMExt* java_vm, JNIEnvExt* jni_env_ext) {
+                ......
+                // 判断参数 jni_env_ext 是否为空
+                if (jni_env_ext != nullptr) {   // 传入 jni_env_ext 不为空
+                    DCHECK_EQ(jni_env_ext->GetVm(), java_vm);
+                    DCHECK_EQ(jni_env_ext->GetSelf(), this);
+                    tlsPtr_.jni_env = jni_env_ext;
+                } else {    // 传入 jni_env_ext 为空
+                    tlsPtr_.jni_env = JNIEnvExt::Create(this, java_vm, &error_msg); // 调用 JNIEnvExt::Create() 创建 JNIEnvExt 对象, 并赋值给 tlsPtr_.jni_env
+                    if (tlsPtr_.jni_env == nullptr) {
+                      return false;
+                    }
+                }
+                thread_list->Register(this);
+                return true;
+            }
+
+        下面看 JNIEnvExt::Create() 函数实现代码, 代码路径 /art/runtime/jni_env_ext.cc
+            JNIEnvExt* JNIEnvExt::Create(Thread* self_in, JavaVMExt* vm_in, std::string* error_msg) {
+              std::unique_ptr<JNIEnvExt> ret(new JNIEnvExt(self_in, vm_in, error_msg));
+              if (CheckLocalsValid(ret.get())) {
+                return ret.release();
+              }
+              return nullptr;
+            }
+        因此, 主线程中的 JNI 是在创建 AndroidRuntime 虚拟机时就创建好了, 其余 Java 线程的 JNI 环境是在该线程开始运行时建立的, 并在该线程结束时释放.
+
+
+        在 "22.5.2 ART的初始化" 一节中将分析下面这些函数.
+        AndroidRuntime 的 start() 函数实现代码, 代码路径 /frameworks/base/core/jni/AndroidRuntime.cpp
+            #include <android_runtime/AndroidRuntime.h>
+            #include "jni.h"
+            #include <nativehelper/JNIHelp.h>
+            #include <nativehelper/JniInvocation.h>
+            #include "android_util_Binder.h"
+
+            void AndroidRuntime::start(const char* className, const Vector<String8>& options, bool zygote) {
+                static const String8 startSystemServer("start-system-server");
+                const char* rootDir = getenv("ANDROID_ROOT");
+                if (rootDir == NULL) {
+                    rootDir = "/system";
+                    if (!hasDir("/system")) {
+                        return;
+                    }
+                    setenv("ANDROID_ROOT", rootDir, 1);
+                }
+                // start the virtual machine
+                JniInvocation jni_invocation;
+                jni_invocation.Init(NULL);
+                JNIEnv* env;
+                if (startVm(&mJavaVM, &env, zygote) != 0) { //调用 startVm(), 传入 env
+                    return;
+                }
+                onVmCreated(env);
+                // Register android functions.
+                if (startReg(env) < 0) {
+                    return;
+                }
+                ......
+            }
+
+        AndroidRuntime 的 startVm() 函数实现代码, 代码路径 /frameworks/base/core/jni/AndroidRuntime.cpp
+            int AndroidRuntime::startVm(JavaVM** pJavaVM, JNIEnv** pEnv, bool zygote) {
+                ......
+                if (JNI_CreateJavaVM(pJavaVM, pEnv, &initArgs) < 0) {
+                     return -1;
+                 }
+                 return 0;
+            }
+
+
 5.3.3 JNI中的异常处理
+    1. 在 JNI 中检查 Java 层中发生的例外
+
+        Android 的 C++ 层不支持 try-catch 机制.
+        如果 JNI 中调用 Java 层的方法时发生了例外会如何呢?  这种情况下, JNI 中的调用会正常返回, 但是, 如果再继续调用其他 JNI 函数, 可能会导致程序崩溃.
+
+        JNI 中提供了一组函数来检查 Java 方法是否抛出了例外, 这些函数的原型如下:
+            jthrowable ExceptionOccurred()      // 检查是否有例外发生
+            void ExceptionDescribe()            // 打印输出 Exception 的信息
+            void ExceptionClear()               // 清除例外
+            void FatalError(const char* msg)    //
+            jboolean ExceptionCheck()           //
+
+        我们可以在代码中这样来使用它们:
+            DCHECK(throwable != nullptr);
+            if (!jnienv->IsInstanceOf(throwable, data->exception_klass)) {
+                return;
+            }
+            jthrowable e = jnienv->ExceptionOccurred();
+            jnienv->ExceptionClear();
+            CHECK(data->exception_event != nullptr);
+            jobject throw_method_arg = GetJavaMethod(jvmti, jnienv, throw_method);
+
+            jclass clazz = (*env)->FindClass(env,"android/content/Intent");
+            if(jnienv->ExceptionOccurred() != NULL) {
+                jnienv->ExceptionDescribe();
+                jnienv->ExceptionClear();
+            }
+
+    2. 在 JNI 中抛出例外
+        JNIEnv 提供了两个函数供开发人员在 JNI 中抛出例外, 如下所示:
+            jint Throw(jthrowable obj)      // Throw()函数用来抛出已经存在的例外, 通常用于捕获例外后再次抛出.
+            jint ThrowNew(jclass clazz, const char* message)    // ThrowNew()函数用来生成一个例外并向外抛出, 参数 clazz 是指 Java 中 Exception 类及其派生类的对象.
+
+        JNIHelp 中也定义了几个函数来方便抛出常见的例外, 下面是它们的原型, 代码路径 /libnativehelper/JNIHelp.cpp
+        int jniThrowException(C_JNIEnv* env, const char* className, const char* msg);
+        int jniThrowNullPointerException(C_JNIEnv* env, const char* msg);
+        int jniThrowRuntimeException(C_JNIEnv* env, const char* msg);
+        int jniThrowIOException(C_JNIEnv* env, int errnum);
+        void jniLogException(C_JNIEnv* env, int priority, const char* tag, jthrowable exception);
+
+        inline int jniThrowException(JNIEnv* env, const char* className, const char* msg)
+        inline int jniThrowNullPointerException(JNIEnv* env, const char* msg)
+        inline int jniThrowRuntimeException(JNIEnv* env, const char* msg)
+        inline int jniThrowIOException(JNIEnv* env, int errnum)
+        inline void jniLogException(JNIEnv* env, int priority, const char* tag, jthrowable exception = NULL)
+        inline int jniThrowExceptionFmt(JNIEnv* env, const char* className, const char* fmt, ...)
+
+
 5.3.4 JNI中的引用
-5.3.5 指明错误位置——
-“CheckJNI”的作用
+    JNI 定义了四中引用类型:
+        typedef enum jobjectRefType {
+            JNIInvalidRefType = 0,
+            JNILocalRefType = 1,
+            JNIGlobalRefType = 2,
+            JNIWeakGlobalRefType = 3
+        } jobjectRefType;
+
+    下面介绍 JNI 中三种引用: 本地引用(LocalReference), 全局引用(GlobalReference), 弱全局引用(WeakGlobalReference).
+
+    JNI 位于 C/C++ 和 Java 之间, 虽然 JNI 函数的代码使用 C/C++ 语言编写, 但是我们要从 Java 的角度来考虑问题.
+    在 Java 的世界里, 每个对象都有生命周期, 如果一个对象不需要了, 会被系统自动清除.
+    在 JNI 中创建的 Java 对象和 Java 层创建的对象并没有区别, 它们的生命周期是一致的.
+
+    1. 本地引用
+        JNI 中提供了增加和移除 本地引用的函数 原型如下::
+            jobject NewLocalRef(jobject ref)
+            void DeleteLocalRef(jobject localRef)
+        注:
+            在 JNI 本地函数中生成的 Java 对象, 它们的生命周期应该在函数退出时结束. 虚拟机如何做到在函数执行期间不会受他们, 一旦函数退出就回收呢? 在后面介绍 Dalvik 的内存回收原理时会讲到每个 Java 线程中都有一张 "本地引用(LocalReference)" 表,
+            Dalvik 不会回收这张表里的对象, 这就是本地引用的由来, 为了不让 Dalvik 在本地函数执行期间回收函数中生成的 Java 对象, JNIEnv 隐式的把这些 Java 对象都加入到本地引用表中了.
+            如果希望将一个在本地函数中生成的 Java 对象留给下次调用时使用, 不能把它保存在一个本地的全局静态变量中, 这样并不能阻止它被回收掉.
+
+    2. 全局引用
+        增加和移除 全局引用的函数 原型如下:
+            jobject NewGlobalRef(jobject obj)
+            void DeleteGlobalRef(jobject globalRef)
+        注:
+            NewGlobalRef()函数的作用是将 Java 对象从本地引用表中删除掉, 然后放到全局引用表中. 放入全局引用表中的 Java 对象是不会被回收的.
+            全局引用表中的对象需要调用 DeleteGlobalRef() 函数显式删除, DeleteGlobalRef() 函数只会把对象从全局引用表中删除, 不会立刻回收对象, 等到下次系统垃圾回收时才会真正释放对象.
+
+
+    3. 弱全局引用
+        增加和移除 弱全局引用的函数 原型如下:
+            jweak NewWeakGlobalRef(jobject obj)
+            void DeleteWeakGlobalRef(jweak obj)
+        注:
+            弱全局引用对象只是暂时保存对象, 如果对象只有弱全局引用, 下次垃圾回收时将会被回收.
+
+
+5.3.5 指明错误位置 —— "CheckJNI"的作用
+    Android 定义了属性 "debug.checkjni", 当值为1时, 系统的 JNI 函数会对调用的参数进行更多的检查, 如果发现会导致错误的参数, 将打印出 log 信息.
+    在真实设备上这个值通常是0, 使用下面命令来开启:
+        adb shell setprop debug.checkjni 1
+    注意已经启动的应用将不会受这个改变的影响, 需要重启应用.
+
+
+
+
 5.4 ART带来的JNI变化
+    Android 5.0 中 ART 已经完全取代了 Dalvik, 绝大部分的 JNI 程序并不需要做任何调整就能正常运行. 但是虚拟机的更换还是会带来一些细微的变化.
+
+
 5.4.1 垃圾回收的影响
+    ART 中的垃圾回收算法将会移动对象在内存中的位置, 这样做的目的是为了减少内存碎片, 提过内存的使用率.
+    对于 Java 程序这样做并不会带来太大的困扰, 但是, 对于 JNI 程序就要注意了, 不要试图通过指针的方式来直接访问 JNI 函数分配的对象, 在 Dalvik 下这样做不会造成程序发生崩溃, 在 ART 下就可能会出错.
+
+    JNI 中使用和释放 Java 层传递的数组参数要通过 GetIntArrayElements() 和 ReleaseIntArrayElements() 两组函数的处理,
+    在以前 Dalvik 的实现中 GetIntArrayElements() 函数通常返回的是对数组元素实际内存的引用, 但是在 ART 中, 这个函数返回的可能是数组元素的复制.
+
+    如果改变了数组元素的内容, 必须调用 ReleaseIntArrayElements() 函数来保证改动能被复制回数组元素的真实地址中.
+
+    ReleaseIntArrayElements() 系列函数的最后一个参数是 mode, 它有3个可能的值:0, JNI_ABORT, JNI_COMMIT.
+        #define JNI_COMMIT   1     /* copy content, do not free buffer */
+        #define JNI_ABORT    2     /* free buffer w/o copying back */
+    注意:
+        如果没有对数组元素做出改变, 可以使用 JNI_ABORT 作为参数, 这样数组元素将会保持不变.
+        如果对数组元素做出了改变, 可以使用 0 或 JNI_COMMIT 作为参数, 这样可以让改动复制回数组元素的真实地址
+        这两个参数的区别是: 使用0会同时释放掉数组元素的复制, 这样将不能继续对数组元素进行操作; 而 JNI_COMMIT 只将改变复制回去, 不会释放复制本身.
+
+
 5.4.2 错误处理的变化
-5.4.3 堆栈可能引发的问题 
+    ART 中更多的 JNI 函数会抛出"异常", 而 Dalvik 中可能只是返回 NULL.
+    这样带来的影响是在 Dalvik 中能正常运行的程序, 在 ART 中可能因为没有对异常进行处理而导致程序出现错误.
+
+    例如:
+        registerNativeMethods()函数在注册的函数不存在时会抛出 NoSuchMethodError异常.
+        GetFieldID() 和 GetStaticFieldID() 函数肯能会抛出 NoSuchFieldError异常
+        GetMethodID() 和 GetStaticMethodID() 函数肯能会抛出 NoSuchMethodError异常
+
+
+5.4.3 堆栈可能引发的问题
+    在 ART 中, native 和 Java 的代码将使用相同的堆栈. 之前在 Dalvik 的实现中的实现策略是: native 的代码和 Java 的代码使用不同的堆栈, 而且大小也不相同, 通常 Java 的堆栈大小为 32KB, 而 native 的堆栈大小为 1MB.
+
+    ART 线程的堆栈大小通常情况下和 Dalvik 中的相同, 如果堆栈太小引发程序出错, 可以在程序中指定堆栈的大小.
+
+    在 Java 代码中, Thread 类的构造方法就可以指定堆栈的大小.
+        public Thread()
+        public Thread(String name)
+        public Thread(Runnable target)
+        public Thread(Runnable target, String name)
+        public Thread(ThreadGroup group, String name)
+        public Thread(ThreadGroup group, Runnable target)
+        public Thread(ThreadGroup group, Runnable target, String name)
+        public Thread(ThreadGroup group, Runnable target, String name, long stackSize) // stackSize 指定堆栈大小
+
+    在 JNI 代码中, 对于运行有 Java 代码的线程, 可以通过 pthread_attr_setstacksize()函数来调整堆栈的大小.
