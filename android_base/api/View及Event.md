@@ -13,7 +13,7 @@ MotionEvent中getAction()与getActionMasked()的区别
         因为动作类型只需要0-255就能表示全部, 触控点信息mPointer也只需要0-255就能全部表示, 用一个字段只占32位, 用两个字段需要占32*2=64位, 即节约内存,又方便提高处理速度.
         通常我们是以不同的字段来存储不同的信息, 但是计算机内部始终是以位来存储信息, 这对于理解android中的很多变量是很有帮助的, 因为有很多变量使用这种技巧来节约内存.
         onMeasure中的MeasureSpec也是这么存储的.
-        
+
 MotionEvent中getX()与getRawX()的区别
     MotionEvent.getX():获取的是点击事件距离控件自身左边的距离
     MotionEvent.getY():获取的是点击事件距离控件自身上边的距离
