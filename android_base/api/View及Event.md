@@ -2,7 +2,7 @@ MotionEvent中getAction()与getActionMasked()的区别
     如果mAction的值是在0x00到0xff之间, getAction()和getActionMasked()的返回的值是一样的.
     当有多点触控时mAction的值会大于0xff, mAction的低8位(也就是0-7位)是动作类型信息, mAction的高8位(也就是8-15位)是触控点的索引信息(即表示是哪一个触控点的事件).
     public static final int ACTION_MASK                = 0xff;
-    public static final int ACTION_MASK                = 0x00ff;//低8位, (0-7位)是动作类型信息
+    public static final int ACTION_POINTER_ID_MASK     = 0x00ff;//低8位, (0-7位)是动作类型信息
     public static final int ACTION_POINTER_INDEX_MASK  = 0xff00;//高8位, (8-15位)是触控点的索引信息(即表示第几个触控点)
     例如:
         mAction=0x0000, 表示第一个触控点的ACTION_DOWN操作.

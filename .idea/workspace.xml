@@ -5,37 +5,22 @@
   </component>
   <component name="ChangeListManager">
     <list default="true" id="86933e43-61cb-4f1c-8d60-f77b187f0ea1" name="Default" comment="">
+      <change afterPath="$PROJECT_DIR$/.idea/qaplug_profiles.xml" afterDir="false" />
+      <change afterPath="$PROJECT_DIR$/Android 动画框架" afterDir="false" />
+      <change afterPath="$PROJECT_DIR$/java_base/Object" afterDir="false" />
+      <change afterPath="$PROJECT_DIR$/project_structure.md" afterDir="false" />
+      <change afterPath="$PROJECT_DIR$/terminology" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/.idea/misc.xml" beforeDir="false" afterPath="$PROJECT_DIR$/.idea/misc.xml" afterDir="false" />
       <change beforePath="$PROJECT_DIR$/.idea/workspace.xml" beforeDir="false" afterPath="$PROJECT_DIR$/.idea/workspace.xml" afterDir="false" />
       <change beforePath="$PROJECT_DIR$/android_base/api/View及Event.md" beforeDir="false" afterPath="$PROJECT_DIR$/android_base/api/View及Event.md" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/life.md" beforeDir="false" />
-      <change beforePath="$PROJECT_DIR$/project_structure.md" beforeDir="false" />
-      <change beforePath="$PROJECT_DIR$/third_tools/jfrog_bintray.md" beforeDir="false" />
+      <change beforePath="$PROJECT_DIR$/android_base/terminology" beforeDir="false" afterPath="$PROJECT_DIR$/android_base/terminology" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/android_base/深入解析Android5.0系统_刘超/Chapter6" beforeDir="false" afterPath="$PROJECT_DIR$/android_base/深入解析Android5.0系统_刘超/Chapter6" afterDir="false" />
       <change beforePath="$PROJECT_DIR$/www.md" beforeDir="false" afterPath="$PROJECT_DIR$/www.md" afterDir="false" />
     </list>
     <option name="SHOW_DIALOG" value="false" />
     <option name="HIGHLIGHT_CONFLICTS" value="true" />
     <option name="HIGHLIGHT_NON_ACTIVE_CHANGELIST" value="false" />
     <option name="LAST_RESOLUTION" value="IGNORE" />
-  </component>
-  <component name="FindInProjectRecents">
-    <findStrings>
-      <find>$USER_HOME$/下载/gradle-4.6/</find>
-      <find>switch</find>
-      <find>FF</find>
-      <find>位运算</find>
-      <find>输入</find>
-      <find>df91</find>
-      <find>ff</find>
-      <find>密度</find>
-      <find>原子</find>
-    </findStrings>
-    <replaceStrings>
-      <replace>###</replace>
-    </replaceStrings>
-    <dirStrings>
-      <dir>$PROJECT_DIR$/android_base/深入解析Android5.0系统_刘超</dir>
-      <dir>$PROJECT_DIR$</dir>
-    </dirStrings>
   </component>
   <component name="Git.Settings">
     <option name="RECENT_GIT_ROOT_PATH" value="$PROJECT_DIR$" />
@@ -53,29 +38,32 @@
   <component name="PropertiesComponent">
     <property name="RunOnceActivity.OpenProjectViewOnStart" value="true" />
     <property name="RunOnceActivity.ShowReadmeOnStart" value="true" />
+    <property name="SHARE_PROJECT_CONFIGURATION_FILES" value="true" />
     <property name="android.project.structure.last.selected" value="SDK Location" />
     <property name="android.project.structure.proportion" value="0.15" />
     <property name="android.sdk.path" value="$USER_HOME$/Android/Sdk" />
+    <property name="dart.analysis.tool.window.visible" value="false" />
     <property name="last_opened_file_path" value="$PROJECT_DIR$" />
     <property name="project.structure.last.edited" value="Project" />
     <property name="project.structure.proportion" value="0.15" />
     <property name="project.structure.side.proportion" value="0.0" />
     <property name="settings.editor.selected.configurable" value="preferences.keymap" />
+    <property name="show.migrate.to.gradle.popup" value="false" />
   </component>
   <component name="RecentsManager">
-    <key name="CopyFile.RECENT_KEYS">
-      <recent name="$PROJECT_DIR$/android_base/深入解析Android5.0系统_刘超" />
-      <recent name="$PROJECT_DIR$/android_base" />
-      <recent name="$PROJECT_DIR$/android_base/API" />
-      <recent name="$PROJECT_DIR$/java_base" />
-      <recent name="$PROJECT_DIR$/android_base/深入理解Android自动化测试/code" />
-    </key>
     <key name="MoveFile.RECENT_KEYS">
       <recent name="$PROJECT_DIR$/interview" />
       <recent name="$PROJECT_DIR$/android_base/深入理解Android自动化测试/code" />
       <recent name="$PROJECT_DIR$/android_base/深入理解Android自动化测试" />
       <recent name="$PROJECT_DIR$/Gradle" />
       <recent name="$PROJECT_DIR$/android_base" />
+    </key>
+    <key name="CopyFile.RECENT_KEYS">
+      <recent name="$PROJECT_DIR$/java_base" />
+      <recent name="$PROJECT_DIR$" />
+      <recent name="$PROJECT_DIR$/android_base/深入解析Android5.0系统_刘超" />
+      <recent name="$PROJECT_DIR$/android_base" />
+      <recent name="$PROJECT_DIR$/android_base/API" />
     </key>
   </component>
   <component name="RunManager">
@@ -88,17 +76,18 @@
       <option name="POLICY_FILE" value="$APPLICATION_HOME_DIR$/bin/appletviewer.policy" />
       <option name="VM_PARAMETERS" />
     </configuration>
-    <configuration name="&lt;template&gt;" type="JUnit" default="true" selected="false">
-      <option name="MAIN_CLASS_NAME" />
-      <option name="VM_PARAMETERS" value="-ea" />
-      <option name="PARAMETERS" />
-      <option name="WORKING_DIRECTORY" value="%MODULE_WORKING_DIR%" />
-    </configuration>
     <configuration name="&lt;template&gt;" type="#org.jetbrains.idea.devkit.run.PluginConfigurationType" default="true" selected="false">
       <option name="VM_PARAMETERS" value="-Xmx512m -Xms256m -XX:MaxPermSize=250m -ea" />
     </configuration>
     <configuration default="true" type="Application" factoryName="Application">
       <option name="WORKING_DIRECTORY" value="$PROJECT_DIR$" />
+      <method v="2">
+        <option name="Make" enabled="true" />
+      </method>
+    </configuration>
+    <configuration default="true" type="JUnit" factoryName="JUnit">
+      <option name="TEST_OBJECT" value="class" />
+      <option name="WORKING_DIRECTORY" value="%MODULE_WORKING_DIR%" />
       <method v="2">
         <option name="Make" enabled="true" />
       </method>
@@ -113,6 +102,7 @@
       </method>
     </configuration>
   </component>
+  <component name="SpellCheckerSettings" RuntimeDictionaries="0" Folders="0" CustomDictionaries="0" DefaultDictionary="application-level" UseSingleDictionary="true" transferred="true" />
   <component name="SvnConfiguration">
     <configuration />
   </component>
@@ -125,12 +115,6 @@
       <updated>1554878162580</updated>
     </task>
     <servers />
-  </component>
-  <component name="WindowStateProjectService">
-    <state x="545" y="316" key="#com.intellij.fileTypes.FileTypeChooser" timestamp="1608196835979">
-      <screen x="0" y="23" width="1680" height="969" />
-    </state>
-    <state x="545" y="316" key="#com.intellij.fileTypes.FileTypeChooser/0.23.1680.969@0.23.1680.969" timestamp="1608196835979" />
   </component>
   <component name="masterDetails">
     <states>

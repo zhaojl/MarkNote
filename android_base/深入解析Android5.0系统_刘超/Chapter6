@@ -7,7 +7,7 @@
 Linux 下线程的运行模式是抢占式, 因此, 程序可能会在任何时刻失去对 CPU 的占用.
 为了防止使用全局资源时因为线程的切换出现错误, 通常需要使用系统提供的同步机制来 "独占" 全局资源的访问权.
 
-虽然同步机制能解决资源访问的冲突问题, 但是也不可避免的带来了性能上的损失. 因此在不影响正确性的前提下, 应当尽量避免使用同步机制.
+虽然同步机制能解决资源访问的冲突问题, 但也不可避免的带来了性能上的损失. 因此在不影响正确性的前提下, 应当尽量避免使用同步机制.
 
 
 
@@ -62,53 +62,36 @@ Linux 下线程的运行模式是抢占式, 因此, 程序可能会在任何时�
             int android_atomic_release_cas(int32_t oldvalue, int32_t newvalue, volatile int32_t* addr) 原子比较并交换
 
         8. 还有两个原子变量的宏定义
-            /* #define a b 写代码时用a代替b, Aliases for code using an older version of this header */
-            #define android_atomic_write android_atomic_release_store
-            #define android_atomic_cmpxchg android_atomic_release_cas
+            /*
+              #define a b 写代码时用a代替b, Aliases for code using an older version of this header
+            */
+            #define android_atomic_write android_atomic_release_store（原子赋值）
+            #define android_atomic_cmpxchg android_atomic_release_cas（原子比较并交换）
 
         9. 添加内存屏障函数
-            void android_compiler_barrier(void)
-            void android_memory_barrier(void)
+            void android_compiler_barrier(void)（编译屏障）
+            void android_memory_barrier(void)（内存屏障）
 
-        下面是这两个内存屏障函数的代码:
+        下面是这两个屏障函数的代码:
             // Fence primitives.
             ANDROID_ATOMIC_INLINE
-            void android_compiler_barrier(void) {
+            void android_compiler_barrier(void) {//编译屏障
                 __asm__ __volatile__ ("" : : : "memory");
             }
 
             ANDROID_ATOMIC_INLINE
-            void android_memory_barrier(void) {
+            void android_memory_barrier(void) {//内存屏障
                 atomic_thread_fence(memory_order_seq_cst);
             }
 
 
 6.1.2 原子操作的实现原理
-    Android 原子操作的实现方式和 CPU 的架构有密切关系, 现在的原子操作一般都是在 CPU 指令级别实现的.
-    这种实现方式不但简单, 而且效率非常高.
+    Android 原子操作的实现方式和 CPU 的架构有密切关系, 现在的原子操作一般都是在 CPU 指令级别实现的. 这种实现方式不但简单, 而且效率非常高.
 
-    虽然原子操作的接口函数有 10 个, 但是只有 android_atomic_add() 和 android_atomic_cas() 两个函数通过汇编代码真正实现了原子操作,
-    其他函数都只是在内部调用它们而已, 这两个函数的原理差不多.
+    虽然原子操作的接口函数有 10 个, 但是, 只有 android_atomic_add() 和 android_atomic_cas() 这两个函数通过汇编代码真正实现了原子操作, 其他函数都只是在内部调用它们而已, 这两个函数的原理差不多.
 
     ARM 平台上的实现更复杂一点, 下面以 ARM 平台的加法函数为例来分析原子变量的实现原理:
     代码路径 /device/google/contexthub/firmware/os/cpu/cortexm4/atomic.c
-
-        uint32_t atomicAddByte(volatile uint8_t *byte, uint32_t addend) {
-            uint32_t prevVal, storeFailed, tmp;
-
-            do {
-                asm volatile(
-                    "ldrexb %0,     [%4] \n"
-                    "add    %2, %0, %3   \n"
-                    "strexb %1, %2, [%4] \n"
-                    :"=r"(prevVal), "=r"(storeFailed), "=r"(tmp), "=r"(addend), "=r"(byte)
-                    :"3"(addend), "4"(byte)
-                    :"memory"
-                );
-            } while (storeFailed);
-
-            return prevVal;
-        }
 
         uint32_t atomicAdd32bits(volatile uint32_t *word, uint32_t addend) {
             uint32_t prevVal, storeFailed, tmp;
@@ -120,22 +103,6 @@ Linux 下线程的运行模式是抢占式, 因此, 程序可能会在任何时�
                     "strex  %1, %2, [%4] \n"
                     :"=r"(prevVal), "=r"(storeFailed), "=r"(tmp), "=r"(addend), "=r"(word)
                     :"3"(addend), "4"(word)
-                    :"memory"
-                );
-            } while (storeFailed);
-
-            return prevVal;
-        }
-
-        uint32_t atomicXchgByte(volatile uint8_t *byte, uint32_t newVal) {
-            uint32_t prevVal, storeFailed;
-
-            do {
-                asm volatile(
-                    "ldrexb %0,     [%3] \n"
-                    "strexb %1, %2, [%3] \n"
-                    :"=r"(prevVal), "=r"(storeFailed), "=r"(newVal), "=r"(byte)
-                    :"2"(newVal), "3"(byte)
                     :"memory"
                 );
             } while (storeFailed);
@@ -157,31 +124,6 @@ Linux 下线程的运行模式是抢占式, 因此, 程序可能会在任何时�
             } while (storeFailed);
 
             return prevVal;
-        }
-
-        bool atomicCmpXchgByte(volatile uint8_t *byte, uint32_t prevVal, uint32_t newVal) {
-            uint32_t currVal, storeFailed;
-
-            do {
-                asm volatile(
-                    "ldrexb %0,     [%1] \n"
-                    :"=r"(currVal), "=r"(byte)
-                    :"1"(byte)
-                    :"memory"
-                );
-
-                if (currVal != prevVal)
-                    return false;
-
-                asm volatile(
-                    "strexb %0, %1, [%2] \n"
-                    :"=r"(storeFailed), "=r"(newVal), "=r"(byte)
-                    :"1"(newVal), "2"(byte)
-                    :"memory"
-                );
-            } while (storeFailed);
-
-            return true;
         }
 
         bool atomicCmpXchg32bits(volatile uint32_t *word, uint32_t prevVal, uint32_t newVal) {
@@ -224,7 +166,7 @@ Linux 下线程的运行模式是抢占式, 因此, 程序可能会在任何时�
 
         2) ldrex 指令的作用是将指针 ptr 指向的内容放到 prev 变量中, 同时给执行处理器做一个标记(tag), 标记上指针 ptr 的地址, 表示这个内存地址已经有一个 CPU 正在访问.
         当执行到 strex 指令时, 它会检查是否存在 ptr 的地址标记, 如果标记存在, strex 指令会把 add 指令执行的结果写入指针 ptr 指向的地址, 并返回0, 然后清除该标记.
-        返回的加过0 将保存在 status 变量中, 这样循环结束, 函数返回结果.
+        返回的结果 0 将保存在 status 变量中, 这样循环结束, 函数返回结果.
 
         3) 如果在 strex 指令执行前发生了线程的上下文切换, 在切换回来后, ldrex 指令设置的标志将会被清除.
         这时再执行 strex 指令时, 由于没有了这个标志, strex 指令将不会完成对 ptr 指针的存储操作, 而且 status 变量中的返回结果将是1, 因此, 循环将重新开始执行, 直到成功为止.
@@ -589,7 +531,7 @@ Linux 下线程的运行模式是抢占式, 因此, 程序可能会在任何时�
 
 
 
-6.3 Android Java层的同步机制
+6.3 Android Java 层的同步机制
     Java 语言和 C/C++ 语言不一样, Java 语言中提供了同步关键字 synchronized 来支持线程间的同步操作.
 
 6.3.1 同步关键字 synchronized
@@ -608,7 +550,7 @@ Linux 下线程的运行模式是抢占式, 因此, 程序可能会在任何时�
 
 
 
-6.3.2 Object类在同步中的作用
+6.3.2 Object 类在同步中的作用
     synchronized 关键字只能提供互斥访问的同步机制, 如果需要完成一些更复杂的同步操作, 就需要 Object 类来配合完成.
 
     Object 类是所有 Java 对象的基类, 在 Object 类中提供了一些与同步相关的方法, 如下所示:
@@ -619,18 +561,67 @@ Linux 下线程的运行模式是抢占式, 因此, 程序可能会在任何时�
         wait(long millis, int nanos)
     注:
         同步相关的接口分为 notify 和 wait 两种类型.
-        notify 类型的函数用来唤醒挂起的线程, 唤醒别人
-        wait 类型的函数用来挂起调用者所在的线程, 挂起调用者所在的线程, 即将自己挂起.
+        notify 类型的函数用来唤醒挂起的线程, 唤醒别的线程;
+        wait 类型的函数用来挂起调用者所在的线程, 挂起调用者所在的线程, 即挂起自己.
     注意:
-        这些方法并不是随时随地都可以调用的, 对它们的调用必须是在本线程取得对 "Object 对象" 的控制权以后才能进行.
-        更准确的说, 应该在 synchronized 的作用域内调用.
+        这些方法并不是随时随地都可以调用的, 对它们的调用必须是在本线程取得对 "Object 对象" 的控制权以后才能进行, 更准确的说, 应该在 synchronized 的作用域内调用.
 
+    详细介绍 Object.java 类，请移至 /MarkNote/java_base/Object
 
     这可能有点不太好理解, 下面来看一个使用 Object 对象做同步控制的例子, 代码如下:
+    //打印类
+    class ThreadPrint extends Thread {
+
+        private static final String TAG = "ThreadPrint";
+        private final String name;
+        private final Object lock;
+
+        public ThreadPrint(String name, Object lock) {
+            this.name = name;
+            this.lock = lock;
+        }
+
+        @Override
+        public void run() {
+            int count = 10;
+            while (count > 0) {
+                synchronized (lock) {
+                    try {
+                        System.out.println(TAG + ":  " + name);
+                        lock.notify();
+
+                        if (--count > 0) {
+                            lock.wait();
+                        }
+                    } catch (InterruptedException|IllegalMonitorStateException e) {
+                        e.printStackTrace();
+                    }
+                }
+            }
+        }
+    }
+    //测试类
+    class ObjectTest {
+        public static void main(String[] args) {
+            Object lock =  new Object();
+
+            Thread threadA = new ThreadPrint("A", lock);
+            Thread threadB = new ThreadPrint("B", lock);
+
+            threadA.start();
+            threadB.start();
+
+            try {
+                threadA.join();
+                threadB.join();
+            } catch (InterruptedException e) {
+                e.printStackTrace();
+            }
+        }
+    }
 
 
-
-6.4 Android的消息机制
+6.4 Android 的消息机制
     消息驱动是一种进程或线程的运行模式.
     内部和外部的各种事件都可以放到消息队列中按序处理, 这种模式特别适合处理大量的交互事件.
 
@@ -641,10 +632,9 @@ Linux 下线程的运行模式是抢占式, 因此, 程序可能会在任何时�
     现在的操作系统普遍采用消息驱动模式.
 
     Android 中的消息队列和某个线程关联在一起. 每个线程最多有一个消息队列, 消息的取出和处理在线程中完成.
-
     Android 的消息模型相对复杂很多, 使用前必须为线程构造消息队列, 发送消息也必须先得到消息队列的 Handler 对象.
-
     Android 的消息队列在各个线程中, 线程内部的消息发送完全没有额外的开销.
+
     在程序设计时, 可以根据需要在合适的线程中设置消息队列, 线程内部的消息在本线程的消息队列中循环,
     除非必要才向另外的线程发送消息, 因此最大程度的减少了因线程同步带来的系统开销.
     Android 的消息处理方式非常灵活, 消息处理的代码可以集中在一起, 也可以分散在各个 Handler 对象中, 甚至每条 Message 都能有自己的消息处理方法.
@@ -655,17 +645,16 @@ Linux 下线程的运行模式是抢占式, 因此, 程序可能会在任何时�
         Looper 对象是线程的消息循环处理器, 每个线程只能有一个 Looper 对象.
         Looper 内部有一个消息队列 MessageQueue, 所有线程的消息都存放在这个队列中.
         新创建一个线程时, 系统并不会马上为这个线程创建一个 Looper 对象, 需要开发者自己创建.
-        Android 在启动时, 为主线程(UI 线程) 创建了一个 Looper 对象.
+        Android 在启动时, Framework为主线程, 即 UI 线程, 创建了一个 Looper 对象.
 
     2. Handler 类
         Handler 对象是 Message 的接收者和处理者.
         用户使用 Handler 对象把 Message 添加到消息队列中, 同时通过 Handler 的回调方法 handleMessage() 来对消息队列中的 Message 进行处理.
-
         Handler 对象在构造时和某个 Looper 对象关联在一起.
         Handler 和 Looper 是多对一的关系, 多个 Handler 对象可以和一个 Looper 对象关联起来, 反之则不行.
 
     3. Message 类
-        Message 是消息的载体. Message 设计成为 Parcelable 类的派生类, 这表明 Message 可以通过 binder 来跨进程发送.
+        Message类是消息的载体. Message 设计成为 Parcelable 类的派生类, 这表明 Message 可以通过 binder 来跨进程发送.
 
 
     图 6.2 表示了这些类之间的关系.
